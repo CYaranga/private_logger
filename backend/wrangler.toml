@@ -1,0 +1,12 @@
+name = "private-logger-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "private_logs_db"
+database_id = "567469d3-8e51-47aa-88a3-4999c21c16cf"
+
+# Run archiving daily at 3:00 AM UTC
+[triggers]
+crons = ["0 3 * * *"]
