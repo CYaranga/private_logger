@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-backend:
+    name: Check Backend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Dependencies
+        run: bun install
+
+      - name: Type Check
+        run: bun tsc --noEmit
+
+  check-frontend:
+    name: Check Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install Dependencies
+        run: bun install
+
+      - name: Type Check
+        run: bun tsc --noEmit
+
+      - name: Build
+        run: bun run build
+
+  commit-stats:
+    name: Commit Stats
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Show Today's Commits
+        run: |
+          echo "## 📊 Today's Commit Activity" >> $GITHUB_STEP_SUMMARY
+          TODAY=$(date -u +%Y-%m-%d)
+          COUNT=$(git log --oneline --since="$TODAY 00:00:00" --until="$TODAY 23:59:59" | wc -l)
+          GOAL=6
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Date:** $TODAY" >> $GITHUB_STEP_SUMMARY
+          echo "**Commits today:** $COUNT / $GOAL" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ $COUNT -ge $GOAL ]; then
+            echo "✅ **Daily goal achieved!**" >> $GITHUB_STEP_SUMMARY
+          else
+            REMAINING=$((GOAL - COUNT))
+            echo "📝 **$REMAINING more commits needed to reach today's goal**" >> $GITHUB_STEP_SUMMARY
+          fi
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Recent Commits" >> $GITHUB_STEP_SUMMARY
+          git log --oneline -10 >> $GITHUB_STEP_SUMMARY
