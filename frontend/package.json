@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build && mkdir -p dist/logger && mv dist/assets dist/logger/ && mv dist/index.html dist/logger/",
     "preview": "vite preview",
-    "deploy": "bun run build && wrangler pages deploy ./dist"
+    "deploy": "bun run build && wrangler pages deploy ./dist --project-name=private-logger-frontend"
   },
   "dependencies": {
     "react": "^18.3.1",
