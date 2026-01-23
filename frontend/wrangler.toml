@@ -1,3 +1,6 @@
 name = "private-logger-frontend"
 compatibility_date = "2024-11-01"
-pages_build_output_dir = "./dist"
+
+# Deploy as Worker with static assets
+[assets]
+directory = "./dist"
