@@ -44,6 +44,56 @@ function formatDuration(ms: number | null): string {
   return `${(ms / 1000).toFixed(2)}s`;
 }
 
+function syntaxHighlightJson(json: string): JSX.Element[] {
+  const elements: JSX.Element[] = [];
+  let key = 0;
+
+  // Regex to match JSON tokens
+  const tokenRegex = /("(?:\\.|[^"\\])*")\s*:|("(?:\\.|[^"\\])*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b)|(\bnull\b)|([\[\]{}])|([,:])|(\s+)/g;
+
+  let match;
+  let lastIndex = 0;
+
+  while ((match = tokenRegex.exec(json)) !== null) {
+    // Add any unmatched text before this match
+    if (match.index > lastIndex) {
+      elements.push(<span key={key++}>{json.slice(lastIndex, match.index)}</span>);
+    }
+    lastIndex = tokenRegex.lastIndex;
+
+    const [fullMatch, keyWithColon, stringVal, numberVal, boolVal, nullVal, bracket, punctuation, whitespace] = match;
+
+    if (keyWithColon) {
+      // Property key (remove the colon, we'll add it separately)
+      const keyName = keyWithColon.slice(0, -1).trim();
+      elements.push(<span key={key++} className="json-key">{keyName}</span>);
+    } else if (stringVal) {
+      elements.push(<span key={key++} className="json-string">{stringVal}</span>);
+    } else if (numberVal) {
+      elements.push(<span key={key++} className="json-number">{numberVal}</span>);
+    } else if (boolVal) {
+      elements.push(<span key={key++} className="json-boolean">{boolVal}</span>);
+    } else if (nullVal) {
+      elements.push(<span key={key++} className="json-null">{nullVal}</span>);
+    } else if (bracket) {
+      elements.push(<span key={key++} className="json-bracket">{bracket}</span>);
+    } else if (punctuation) {
+      elements.push(<span key={key++} className="json-punctuation">{punctuation}</span>);
+    } else if (whitespace) {
+      elements.push(<span key={key++}>{whitespace}</span>);
+    } else {
+      elements.push(<span key={key++}>{fullMatch}</span>);
+    }
+  }
+
+  // Add any remaining text
+  if (lastIndex < json.length) {
+    elements.push(<span key={key++}>{json.slice(lastIndex)}</span>);
+  }
+
+  return elements;
+}
+
 function JsonViewer({ data, label }: { data: unknown; label: string }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -51,13 +101,24 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
     return <span style={{ color: 'var(--text-secondary)' }}>—</span>;
   }
 
-  const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  // Parse string data if it looks like JSON
+  let parsedData = data;
+  if (typeof data === 'string') {
+    try {
+      parsedData = JSON.parse(data);
+    } catch {
+      // Not valid JSON, keep as string
+      parsedData = data;
+    }
+  }
+
+  const content = typeof parsedData === 'string' ? parsedData : JSON.stringify(parsedData, null, 2);
   const isLong = content.length > 50;
 
   if (!isLong) {
     return (
-      <code className="json-inline">
-        {content.length > 100 ? content.substring(0, 100) + '...' : content}
+      <code className="json-inline json-highlighted">
+        {syntaxHighlightJson(content.length > 100 ? content.substring(0, 100) + '...' : content)}
       </code>
     );
   }
@@ -68,7 +129,7 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
         {expanded ? 'Hide' : 'View'} {label}
       </button>
       {expanded && (
-        <pre className="json-content">{content}</pre>
+        <pre className="json-content json-highlighted">{syntaxHighlightJson(content)}</pre>
       )}
     </div>
   );
