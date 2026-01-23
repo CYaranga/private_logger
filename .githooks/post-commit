@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# Post-commit hook - shows daily commit progress
+
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# Get today's commit count
+today=$(date +%Y-%m-%d)
+commits=$(git log --oneline --since="$today 00:00:00" --until="$today 23:59:59" 2>/dev/null | wc -l | tr -d ' ')
+goal=6
+remaining=$((goal - commits))
+
+echo ""
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo -e "${CYAN}📊 Daily Commit Progress${NC}"
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+
+# Progress bar
+filled=$((commits * 20 / goal))
+if [ $filled -gt 20 ]; then filled=20; fi
+empty=$((20 - filled))
+
+bar=""
+for ((i=0; i<filled; i++)); do bar="${bar}█"; done
+for ((i=0; i<empty; i++)); do bar="${bar}░"; done
+
+echo -e "  [${GREEN}${bar}${NC}] ${commits}/${goal} commits"
+
+if [ $commits -ge $goal ]; then
+    echo -e "  ${GREEN}🎉 Daily goal achieved! Keep it up!${NC}"
+else
+    echo -e "  ${YELLOW}📝 $remaining more to reach today's goal${NC}"
+fi
+
+echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+echo ""
+
+# Remind to push if there are unpushed commits
+unpushed=$(git log @{u}..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')
+if [ "$unpushed" -gt 0 ]; then
+    echo -e "${YELLOW}💡 You have $unpushed unpushed commit(s). Run 'git push' to sync!${NC}"
+    echo ""
+fi
