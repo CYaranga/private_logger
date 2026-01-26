@@ -17,6 +17,37 @@ import {
 
 const ITEMS_PER_PAGE = 25;
 
+// Column configuration for resizing
+type ColumnKey = 'id' | 'timestamp' | 'level' | 'category' | 'user' | 'device' | 'env' | 'message' | 'method' | 'endpoint' | 'status' | 'duration' | 'actions';
+
+const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
+  id: 60,
+  timestamp: 160,
+  level: 70,
+  category: 90,
+  user: 80,
+  device: 100,
+  env: 60,
+  message: 250,
+  method: 70,
+  endpoint: 200,
+  status: 60,
+  duration: 80,
+  actions: 80,
+};
+
+function getStoredColumnWidths(): Record<ColumnKey, number> {
+  try {
+    const stored = localStorage.getItem('columnWidths');
+    if (stored) {
+      return { ...DEFAULT_COLUMN_WIDTHS, ...JSON.parse(stored) };
+    }
+  } catch {
+    // Ignore parse errors
+  }
+  return DEFAULT_COLUMN_WIDTHS;
+}
+
 function formatTimestamp(timestamp: string, timezone?: string): string {
   const date = new Date(timestamp);
   return date.toLocaleString(undefined, {
@@ -164,6 +195,51 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
         <pre className="json-content json-highlighted">{syntaxHighlightJson(content)}</pre>
       )}
     </div>
+  );
+}
+
+function ResizableHeader({
+  columnKey,
+  label,
+  width,
+  onResize,
+}: {
+  columnKey: ColumnKey;
+  label: string;
+  width: number;
+  onResize: (key: ColumnKey, width: number) => void;
+}) {
+  const handleMouseDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = width;
+
+    const handleMouseMove = (moveEvent: MouseEvent) => {
+      const diff = moveEvent.clientX - startX;
+      const newWidth = Math.max(40, startWidth + diff);
+      onResize(columnKey, newWidth);
+    };
+
+    const handleMouseUp = () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  return (
+    <th style={{ width: `${width}px`, minWidth: `${width}px`, maxWidth: `${width}px` }}>
+      <div className="resizable-header">
+        <span>{label}</span>
+        <div className="resize-handle" onMouseDown={handleMouseDown} />
+      </div>
+    </th>
   );
 }
 
@@ -375,26 +451,35 @@ function ArchivesSection({
   );
 }
 
-function LogRow({ log, onDelete, timezone }: { log: Log; onDelete: (id: number) => void; timezone?: string }) {
+function LogRow({ log, onDelete, timezone, columnWidths }: { log: Log; onDelete: (id: number) => void; timezone?: string; columnWidths: Record<ColumnKey, number> }) {
   const [expanded, setExpanded] = useState(false);
   const isApiCall = log.http_method !== null;
+
+  const cellStyle = (key: ColumnKey): React.CSSProperties => ({
+    width: `${columnWidths[key]}px`,
+    minWidth: `${columnWidths[key]}px`,
+    maxWidth: `${columnWidths[key]}px`,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+  });
 
   return (
     <>
       <tr className={`log-row log-level-${log.level}`} onClick={() => setExpanded(!expanded)}>
-        <td style={{ color: 'var(--text-secondary)' }}>#{log.id}</td>
-        <td className="timestamp">{formatTimestamp(log.created_at, timezone)}</td>
-        <td><LevelBadge level={log.level} /></td>
-        <td><CategoryBadge category={log.category} /></td>
-        <td className="user-id">{log.user_id}</td>
-        <td className="device-id">{log.device_id || '—'}</td>
-        <td><EnvironmentBadge env={log.environment} /></td>
-        <td className="message-cell" title={log.message}>{log.message}</td>
-        <td><HttpMethodBadge method={log.http_method} /></td>
-        <td className="endpoint-cell" title={log.endpoint || ''}>{log.endpoint || '—'}</td>
-        <td><StatusCodeBadge code={log.status_code} /></td>
-        <td className="duration-cell">{formatDuration(log.duration_ms)}</td>
-        <td>
+        <td style={{ ...cellStyle('id'), color: 'var(--text-secondary)' }}>#{log.id}</td>
+        <td style={cellStyle('timestamp')} className="timestamp">{formatTimestamp(log.created_at, timezone)}</td>
+        <td style={cellStyle('level')}><LevelBadge level={log.level} /></td>
+        <td style={cellStyle('category')}><CategoryBadge category={log.category} /></td>
+        <td style={cellStyle('user')} className="user-id">{log.user_id}</td>
+        <td style={cellStyle('device')} className="device-id">{log.device_id || '—'}</td>
+        <td style={cellStyle('env')}><EnvironmentBadge env={log.environment} /></td>
+        <td style={cellStyle('message')} className="message-cell" title={log.message}>{log.message}</td>
+        <td style={cellStyle('method')}><HttpMethodBadge method={log.http_method} /></td>
+        <td style={cellStyle('endpoint')} className="endpoint-cell" title={log.endpoint || ''}>{log.endpoint || '—'}</td>
+        <td style={cellStyle('status')}><StatusCodeBadge code={log.status_code} /></td>
+        <td style={cellStyle('duration')} className="duration-cell">{formatDuration(log.duration_ms)}</td>
+        <td style={cellStyle('actions')}>
           <button
             className="btn btn-secondary"
             style={{ padding: '6px 12px', fontSize: '12px' }}
@@ -472,6 +557,15 @@ export default function App() {
   });
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [userTimezone, setUserTimezone] = useState<string | undefined>(undefined);
+  const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(getStoredColumnWidths);
+
+  const handleColumnResize = useCallback((key: ColumnKey, width: number) => {
+    setColumnWidths(prev => {
+      const newWidths = { ...prev, [key]: width };
+      localStorage.setItem('columnWidths', JSON.stringify(newWidths));
+      return newWidths;
+    });
+  }, []);
 
   // Fetch user's timezone from IP geolocation
   useEffect(() => {
@@ -711,27 +805,27 @@ export default function App() {
           ) : (
             <>
               <div className="logs-table logs-table-wide">
-                <table className="resizable-table">
+                <table className="resizable-table" style={{ tableLayout: 'fixed' }}>
                   <thead>
                     <tr>
-                      <th className="col-id">ID</th>
-                      <th className="col-timestamp">Timestamp</th>
-                      <th className="col-level">Level</th>
-                      <th className="col-category">Category</th>
-                      <th className="col-user">User</th>
-                      <th className="col-device">Device</th>
-                      <th className="col-env">Env</th>
-                      <th className="col-message resizable">Message</th>
-                      <th className="col-method">Method</th>
-                      <th className="col-endpoint resizable">Endpoint</th>
-                      <th className="col-status">Status</th>
-                      <th className="col-duration">Duration</th>
-                      <th className="col-actions">Actions</th>
+                      <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="timestamp" label="Timestamp" width={columnWidths.timestamp} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="level" label="Level" width={columnWidths.level} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="category" label="Category" width={columnWidths.category} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="user" label="User" width={columnWidths.user} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="device" label="Device" width={columnWidths.device} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="env" label="Env" width={columnWidths.env} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="message" label="Message" width={columnWidths.message} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="method" label="Method" width={columnWidths.method} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="endpoint" label="Endpoint" width={columnWidths.endpoint} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="status" label="Status" width={columnWidths.status} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="duration" label="Duration" width={columnWidths.duration} onResize={handleColumnResize} />
+                      <ResizableHeader columnKey="actions" label="Actions" width={columnWidths.actions} onResize={handleColumnResize} />
                     </tr>
                   </thead>
                   <tbody>
                     {logs.map((log) => (
-                      <LogRow key={log.id} log={log} onDelete={handleDelete} timezone={userTimezone} />
+                      <LogRow key={log.id} log={log} onDelete={handleDelete} timezone={userTimezone} columnWidths={columnWidths} />
                     ))}
                   </tbody>
                 </table>
