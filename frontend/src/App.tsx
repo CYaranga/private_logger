@@ -1,4 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { FixedSizeList as List, ListOnItemsRenderedProps, ListChildComponentProps } from 'react-window';
 import type { Log, Stats, Filters, Storage, Archive, LogLevel, HttpMethod } from './types';
 import {
   fetchLogs,
@@ -15,7 +16,8 @@ import {
   getExportAllUrl,
 } from './api';
 
-const ITEMS_PER_PAGE = 25;
+const BATCH_SIZE = 50;
+const ROW_HEIGHT = 48;
 
 // Column configuration for resizing
 type ColumnKey = 'id' | 'timestamp' | 'level' | 'category' | 'user' | 'device' | 'env' | 'message' | 'method' | 'endpoint' | 'status' | 'duration' | 'actions';
@@ -451,8 +453,21 @@ function ArchivesSection({
   );
 }
 
-function LogRow({ log, onDelete, timezone, columnWidths }: { log: Log; onDelete: (id: number) => void; timezone?: string; columnWidths: Record<ColumnKey, number> }) {
-  const [expanded, setExpanded] = useState(false);
+function VirtualLogRow({
+  log,
+  onDelete,
+  timezone,
+  columnWidths,
+  isExpanded,
+  onToggleExpand,
+}: {
+  log: Log;
+  onDelete: (id: number) => void;
+  timezone?: string;
+  columnWidths: Record<ColumnKey, number>;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
+}) {
   const isApiCall = log.http_method !== null;
 
   const cellStyle = (key: ColumnKey): React.CSSProperties => ({
@@ -462,74 +477,73 @@ function LogRow({ log, onDelete, timezone, columnWidths }: { log: Log; onDelete:
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
+    padding: '12px 16px',
+    display: 'inline-block',
+    boxSizing: 'border-box',
+    verticalAlign: 'middle',
   });
 
   return (
-    <>
-      <tr className={`log-row log-level-${log.level}`} onClick={() => setExpanded(!expanded)}>
-        <td style={{ ...cellStyle('id'), color: 'var(--text-secondary)' }}>#{log.id}</td>
-        <td style={cellStyle('timestamp')} className="timestamp">{formatTimestamp(log.created_at, timezone)}</td>
-        <td style={cellStyle('level')}><LevelBadge level={log.level} /></td>
-        <td style={cellStyle('category')}><CategoryBadge category={log.category} /></td>
-        <td style={cellStyle('user')} className="user-id">{log.user_id}</td>
-        <td style={cellStyle('device')} className="device-id">{log.device_id || '—'}</td>
-        <td style={cellStyle('env')}><EnvironmentBadge env={log.environment} /></td>
-        <td style={cellStyle('message')} className="message-cell" title={log.message}>{log.message}</td>
-        <td style={cellStyle('method')}><HttpMethodBadge method={log.http_method} /></td>
-        <td style={cellStyle('endpoint')} className="endpoint-cell" title={log.endpoint || ''}>{log.endpoint || '—'}</td>
-        <td style={cellStyle('status')}><StatusCodeBadge code={log.status_code} /></td>
-        <td style={cellStyle('duration')} className="duration-cell">{formatDuration(log.duration_ms)}</td>
-        <td style={cellStyle('actions')}>
-          <button
-            className="btn btn-secondary"
-            style={{ padding: '6px 12px', fontSize: '12px' }}
-            onClick={(e) => { e.stopPropagation(); onDelete(log.id); }}
-          >
-            Delete
-          </button>
-        </td>
-      </tr>
-      {expanded && (
-        <tr className="log-details-row">
-          <td colSpan={13}>
-            <div className="log-details">
-              {/* Full message section */}
-              <div className="log-detail-section log-detail-message">
-                <h4>Full Message</h4>
-                <pre className="full-message-content">{log.message}</pre>
-              </div>
-
-              {/* Endpoint info for API calls */}
-              {isApiCall && log.endpoint && (
-                <div className="log-detail-section">
-                  <h4>Full Endpoint</h4>
-                  <code className="full-endpoint">{log.endpoint}</code>
-                </div>
-              )}
-
-              <div className="log-details-grid">
-                <div className="log-detail-section">
-                  <h4>Metadata</h4>
-                  <JsonViewer data={log.metadata} label="Metadata" />
-                </div>
-                {isApiCall && (
-                  <>
-                    <div className="log-detail-section">
-                      <h4>Request Data</h4>
-                      <JsonViewer data={log.request_data} label="Request" />
-                    </div>
-                    <div className="log-detail-section">
-                      <h4>Response Data</h4>
-                      <JsonViewer data={log.response_data} label="Response" />
-                    </div>
-                  </>
-                )}
-              </div>
+    <div
+      className={`virtual-row log-level-${log.level}`}
+      onClick={onToggleExpand}
+    >
+      <span style={{ ...cellStyle('id'), color: 'var(--text-secondary)' }}>#{log.id}</span>
+      <span style={cellStyle('timestamp')} className="timestamp">{formatTimestamp(log.created_at, timezone)}</span>
+      <span style={cellStyle('level')}><LevelBadge level={log.level} /></span>
+      <span style={cellStyle('category')}><CategoryBadge category={log.category} /></span>
+      <span style={cellStyle('user')} className="user-id">{log.user_id}</span>
+      <span style={cellStyle('device')} className="device-id">{log.device_id || '—'}</span>
+      <span style={cellStyle('env')}><EnvironmentBadge env={log.environment} /></span>
+      <span style={cellStyle('message')} className="message-cell" title={log.message}>{log.message}</span>
+      <span style={cellStyle('method')}><HttpMethodBadge method={log.http_method} /></span>
+      <span style={cellStyle('endpoint')} className="endpoint-cell" title={log.endpoint || ''}>{log.endpoint || '—'}</span>
+      <span style={cellStyle('status')}><StatusCodeBadge code={log.status_code} /></span>
+      <span style={cellStyle('duration')} className="duration-cell">{formatDuration(log.duration_ms)}</span>
+      <span style={cellStyle('actions')}>
+        <button
+          className="btn btn-secondary"
+          style={{ padding: '4px 8px', fontSize: '11px' }}
+          onClick={(e) => { e.stopPropagation(); onDelete(log.id); }}
+        >
+          Delete
+        </button>
+      </span>
+      {isExpanded && (
+        <div className="virtual-row-details" onClick={(e) => e.stopPropagation()}>
+          <div className="log-details">
+            <div className="log-detail-section log-detail-message">
+              <h4>Full Message</h4>
+              <pre className="full-message-content">{log.message}</pre>
             </div>
-          </td>
-        </tr>
+            {isApiCall && log.endpoint && (
+              <div className="log-detail-section">
+                <h4>Full Endpoint</h4>
+                <code className="full-endpoint">{log.endpoint}</code>
+              </div>
+            )}
+            <div className="log-details-grid">
+              <div className="log-detail-section">
+                <h4>Metadata</h4>
+                <JsonViewer data={log.metadata} label="Metadata" />
+              </div>
+              {isApiCall && (
+                <>
+                  <div className="log-detail-section">
+                    <h4>Request Data</h4>
+                    <JsonViewer data={log.request_data} label="Request" />
+                  </div>
+                  <div className="log-detail-section">
+                    <h4>Response Data</h4>
+                    <JsonViewer data={log.response_data} label="Response" />
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
       )}
-    </>
+    </div>
   );
 }
 
@@ -543,8 +557,9 @@ export default function App() {
   const [devices, setDevices] = useState<string[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({
     user_id: '',
@@ -558,12 +573,26 @@ export default function App() {
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [userTimezone, setUserTimezone] = useState<string | undefined>(undefined);
   const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(getStoredColumnWidths);
+  const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const listRef = useRef<List>(null);
 
   const handleColumnResize = useCallback((key: ColumnKey, width: number) => {
     setColumnWidths(prev => {
       const newWidths = { ...prev, [key]: width };
       localStorage.setItem('columnWidths', JSON.stringify(newWidths));
       return newWidths;
+    });
+  }, []);
+
+  const toggleRowExpanded = useCallback((id: number) => {
+    setExpandedRows(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(id)) {
+        newSet.delete(id);
+      } else {
+        newSet.add(id);
+      }
+      return newSet;
     });
   }, []);
 
@@ -584,13 +613,15 @@ export default function App() {
     fetchTimezone();
   }, []);
 
+  // Load initial data
   const loadData = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
+      setExpandedRows(new Set());
 
       const [logsData, statsData, usersData, devicesData, categoriesData, storageData, archivesData] = await Promise.all([
-        fetchLogs(filters, ITEMS_PER_PAGE, page * ITEMS_PER_PAGE),
+        fetchLogs(filters, BATCH_SIZE, 0),
         fetchStats(),
         fetchUsers(),
         fetchDevices(),
@@ -601,6 +632,7 @@ export default function App() {
 
       setLogs(logsData.logs);
       setTotal(logsData.total);
+      setHasMore(logsData.logs.length < logsData.total);
       setStats(statsData);
       setUsers(usersData);
       setDevices(devicesData);
@@ -613,7 +645,24 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [filters, page]);
+  }, [filters]);
+
+  // Load more data for infinite scroll
+  const loadMore = useCallback(async () => {
+    if (loadingMore || !hasMore) return;
+
+    try {
+      setLoadingMore(true);
+      const logsData = await fetchLogs(filters, BATCH_SIZE, logs.length);
+
+      setLogs(prev => [...prev, ...logsData.logs]);
+      setHasMore(logs.length + logsData.logs.length < logsData.total);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load more logs');
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [filters, logs.length, loadingMore, hasMore]);
 
   useEffect(() => {
     loadData();
@@ -627,7 +676,6 @@ export default function App() {
 
   const handleFilterChange = (key: keyof Filters, value: string) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
-    setPage(0);
   };
 
   const clearFilters = () => {
@@ -640,7 +688,6 @@ export default function App() {
       category: '',
       http_method: '',
     });
-    setPage(0);
   };
 
   const hasActiveFilters = Object.values(filters).some(v => v !== '');
@@ -682,8 +729,6 @@ export default function App() {
       setError(err instanceof Error ? err.message : 'Failed to delete archive');
     }
   };
-
-  const totalPages = Math.ceil(total / ITEMS_PER_PAGE);
 
   return (
     <div className="container">
@@ -804,54 +849,74 @@ export default function App() {
             </div>
           ) : (
             <>
-              <div className="logs-table logs-table-wide">
-                <table className="resizable-table" style={{ tableLayout: 'fixed' }}>
-                  <thead>
-                    <tr>
-                      <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="timestamp" label="Timestamp" width={columnWidths.timestamp} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="level" label="Level" width={columnWidths.level} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="category" label="Category" width={columnWidths.category} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="user" label="User" width={columnWidths.user} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="device" label="Device" width={columnWidths.device} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="env" label="Env" width={columnWidths.env} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="message" label="Message" width={columnWidths.message} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="method" label="Method" width={columnWidths.method} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="endpoint" label="Endpoint" width={columnWidths.endpoint} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="status" label="Status" width={columnWidths.status} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="duration" label="Duration" width={columnWidths.duration} onResize={handleColumnResize} />
-                      <ResizableHeader columnKey="actions" label="Actions" width={columnWidths.actions} onResize={handleColumnResize} />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {logs.map((log) => (
-                      <LogRow key={log.id} log={log} onDelete={handleDelete} timezone={userTimezone} columnWidths={columnWidths} />
-                    ))}
-                  </tbody>
-                </table>
+              <div className="logs-table logs-table-wide virtual-table">
+                {/* Fixed header */}
+                <div className="virtual-table-header">
+                  <table className="resizable-table" style={{ tableLayout: 'fixed' }}>
+                    <thead>
+                      <tr>
+                        <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="timestamp" label="Timestamp" width={columnWidths.timestamp} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="level" label="Level" width={columnWidths.level} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="category" label="Category" width={columnWidths.category} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="user" label="User" width={columnWidths.user} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="device" label="Device" width={columnWidths.device} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="env" label="Env" width={columnWidths.env} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="message" label="Message" width={columnWidths.message} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="method" label="Method" width={columnWidths.method} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="endpoint" label="Endpoint" width={columnWidths.endpoint} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="status" label="Status" width={columnWidths.status} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="duration" label="Duration" width={columnWidths.duration} onResize={handleColumnResize} />
+                        <ResizableHeader columnKey="actions" label="Actions" width={columnWidths.actions} onResize={handleColumnResize} />
+                      </tr>
+                    </thead>
+                  </table>
+                </div>
+
+                {/* Virtual scrolling body */}
+                <List
+                  ref={listRef}
+                  height={600}
+                  itemCount={logs.length}
+                  itemSize={ROW_HEIGHT}
+                  width="100%"
+                  onItemsRendered={({ visibleStopIndex }: ListOnItemsRenderedProps) => {
+                    // Load more when near the end
+                    if (visibleStopIndex >= logs.length - 10 && hasMore && !loadingMore) {
+                      loadMore();
+                    }
+                  }}
+                >
+                  {({ index, style }: ListChildComponentProps) => {
+                    const log = logs[index];
+                    const isExpanded = expandedRows.has(log.id);
+                    return (
+                      <div style={style}>
+                        <VirtualLogRow
+                          log={log}
+                          onDelete={handleDelete}
+                          timezone={userTimezone}
+                          columnWidths={columnWidths}
+                          isExpanded={isExpanded}
+                          onToggleExpand={() => toggleRowExpanded(log.id)}
+                        />
+                      </div>
+                    );
+                  }}
+                </List>
+
+                {loadingMore && (
+                  <div className="loading-more">Loading more...</div>
+                )}
               </div>
 
-              <div className="pagination">
-                <div className="pagination-info">
-                  Showing {page * ITEMS_PER_PAGE + 1} -{' '}
-                  {Math.min((page + 1) * ITEMS_PER_PAGE, total)} of {total} logs
-                </div>
-                <div className="pagination-buttons">
-                  <button
-                    className="btn btn-secondary"
-                    disabled={page === 0}
-                    onClick={() => setPage((p) => p - 1)}
-                  >
-                    Previous
+              <div className="scroll-info">
+                Showing {logs.length} of {total} logs
+                {hasMore && !loadingMore && (
+                  <button className="btn btn-secondary" onClick={loadMore} style={{ marginLeft: '12px' }}>
+                    Load More
                   </button>
-                  <button
-                    className="btn btn-secondary"
-                    disabled={page >= totalPages - 1}
-                    onClick={() => setPage((p) => p + 1)}
-                  >
-                    Next
-                  </button>
-                </div>
+                )}
               </div>
             </>
           )}

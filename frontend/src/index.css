@@ -286,6 +286,83 @@ body {
   background: rgba(245, 158, 11, 0.1);
 }
 
+/* Virtual scrolling */
+.virtual-table {
+  display: flex;
+  flex-direction: column;
+}
+
+.virtual-table-header {
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.virtual-table-header table {
+  width: 100%;
+}
+
+.virtual-row {
+  display: flex;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  transition: background 0.15s;
+  background: var(--bg-secondary);
+  font-size: 13px;
+  position: relative;
+}
+
+.virtual-row:hover {
+  background: var(--bg-tertiary);
+}
+
+.virtual-row.log-level-error {
+  background: rgba(239, 68, 68, 0.05);
+}
+
+.virtual-row.log-level-error:hover {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.virtual-row.log-level-warn {
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.virtual-row.log-level-warn:hover {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.virtual-row-details {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-top: none;
+  z-index: 100;
+  cursor: default;
+}
+
+.loading-more {
+  padding: 16px;
+  text-align: center;
+  color: var(--text-secondary);
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+}
+
+.scroll-info {
+  padding: 12px 16px;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
 /* Badges */
 .badge {
   display: inline-block;
