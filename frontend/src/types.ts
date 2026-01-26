@@ -4,6 +4,7 @@ export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS'
 export interface Log {
   id: number;
   user_id: string;
+  device_id: string | null;
   message: string;
   metadata: Record<string, unknown> | null;
   environment: 'dev' | 'test' | 'prod';
@@ -60,6 +61,7 @@ export interface Archive {
 
 export interface Filters {
   user_id: string;
+  device_id: string;
   environment: string;
   search: string;
   level: string;

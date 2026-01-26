@@ -10,6 +10,7 @@ export async function fetchLogs(
   const params = new URLSearchParams();
 
   if (filters.user_id) params.append('user_id', filters.user_id);
+  if (filters.device_id) params.append('device_id', filters.device_id);
   if (filters.environment) params.append('environment', filters.environment);
   if (filters.search) params.append('search', filters.search);
   if (filters.level) params.append('level', filters.level);
@@ -41,6 +42,13 @@ export async function fetchCategories(): Promise<string[]> {
   if (!response.ok) throw new Error('Failed to fetch categories');
   const data = await response.json();
   return data.categories;
+}
+
+export async function fetchDevices(): Promise<string[]> {
+  const response = await fetch(`${API_BASE}/devices`);
+  if (!response.ok) throw new Error('Failed to fetch devices');
+  const data = await response.json();
+  return data.devices;
 }
 
 export async function deleteLog(id: number): Promise<void> {

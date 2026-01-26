@@ -11,6 +11,7 @@ type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'HEA
 type Log = {
   id: number;
   user_id: string;
+  device_id: string | null;
   message: string;
   metadata: string | null;
   environment: 'dev' | 'test' | 'prod';
@@ -35,6 +36,7 @@ type Archive = {
 
 type CreateLogInput = {
   user_id: string;
+  device_id?: string;
   message: string;
   metadata?: Record<string, unknown>;
   environment?: 'dev' | 'test' | 'prod';
@@ -81,6 +83,7 @@ app.post('/logs', async (c) => {
     const environment = body.environment || 'dev';
     const level = body.level || 'info';
     const category = body.category || 'GENERAL';
+    const device_id = body.device_id || null;
     const http_method = body.http_method || null;
     const endpoint = body.endpoint || null;
     const request_data = body.request_data
@@ -93,10 +96,10 @@ app.post('/logs', async (c) => {
     const duration_ms = body.duration_ms ?? null;
 
     const result = await c.env.DB.prepare(
-      `INSERT INTO logs (user_id, message, metadata, environment, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
+      `INSERT INTO logs (user_id, device_id, message, metadata, environment, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
     )
-      .bind(body.user_id, body.message, metadata, environment, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
+      .bind(body.user_id, device_id, body.message, metadata, environment, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
       .first<Log>();
 
     return c.json({ success: true, log: result }, 201);
@@ -128,6 +131,7 @@ function tryParseJSON(str: string): unknown {
 app.get('/logs', async (c) => {
   try {
     const userId = c.req.query('user_id');
+    const deviceId = c.req.query('device_id');
     const environment = c.req.query('environment');
     const limit = parseInt(c.req.query('limit') || '100');
     const offset = parseInt(c.req.query('offset') || '0');
@@ -142,6 +146,11 @@ app.get('/logs', async (c) => {
     if (userId) {
       query += ' AND user_id = ?';
       params.push(userId);
+    }
+
+    if (deviceId) {
+      query += ' AND device_id = ?';
+      params.push(deviceId);
     }
 
     if (environment) {
@@ -165,8 +174,8 @@ app.get('/logs', async (c) => {
     }
 
     if (search) {
-      query += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      query += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ? OR device_id LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
@@ -183,6 +192,11 @@ app.get('/logs', async (c) => {
     if (userId) {
       countQuery += ' AND user_id = ?';
       countParams.push(userId);
+    }
+
+    if (deviceId) {
+      countQuery += ' AND device_id = ?';
+      countParams.push(deviceId);
     }
 
     if (environment) {
@@ -206,8 +220,8 @@ app.get('/logs', async (c) => {
     }
 
     if (search) {
-      countQuery += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ?)';
-      countParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      countQuery += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ? OR device_id LIKE ?)';
+      countParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     const countResult = await c.env.DB.prepare(countQuery)
@@ -266,6 +280,53 @@ app.delete('/logs/:id', async (c) => {
   }
 });
 
+// Get recent logs by device_id and user_id for the last N hours
+app.get('/logs/recent', async (c) => {
+  try {
+    const deviceId = c.req.query('device_id');
+    const userId = c.req.query('user_id');
+    const hours = parseInt(c.req.query('hours') || '24');
+
+    if (!deviceId && !userId) {
+      return c.json({ error: 'At least one of device_id or user_id is required' }, 400);
+    }
+
+    if (hours < 1 || hours > 720) {
+      return c.json({ error: 'hours must be between 1 and 720 (30 days)' }, 400);
+    }
+
+    let query = `SELECT * FROM logs WHERE created_at >= datetime('now', '-${hours} hours')`;
+    const params: string[] = [];
+
+    if (deviceId) {
+      query += ' AND device_id = ?';
+      params.push(deviceId);
+    }
+
+    if (userId) {
+      query += ' AND user_id = ?';
+      params.push(userId);
+    }
+
+    query += ' ORDER BY created_at DESC';
+
+    const { results } = await c.env.DB.prepare(query)
+      .bind(...params)
+      .all<Log>();
+
+    return c.json({
+      logs: results?.map(parseLogFields) || [],
+      count: results?.length || 0,
+      hours,
+      device_id: deviceId || null,
+      user_id: userId || null,
+    });
+  } catch (error) {
+    console.error('Error fetching recent logs:', error);
+    return c.json({ error: 'Failed to fetch recent logs' }, 500);
+  }
+});
+
 // Get unique user IDs for filtering
 app.get('/users', async (c) => {
   try {
@@ -291,6 +352,20 @@ app.get('/categories', async (c) => {
   } catch (error) {
     console.error('Error fetching categories:', error);
     return c.json({ error: 'Failed to fetch categories' }, 500);
+  }
+});
+
+// Get unique device IDs for filtering
+app.get('/devices', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      'SELECT DISTINCT device_id FROM logs WHERE device_id IS NOT NULL ORDER BY device_id'
+    ).all<{ device_id: string }>();
+
+    return c.json({ devices: results?.map(r => r.device_id) || [] });
+  } catch (error) {
+    console.error('Error fetching devices:', error);
+    return c.json({ error: 'Failed to fetch devices' }, 500);
   }
 });
 

@@ -5,6 +5,7 @@ import {
   fetchStats,
   fetchUsers,
   fetchCategories,
+  fetchDevices,
   deleteLog,
   fetchStorage,
   fetchArchives,
@@ -94,6 +95,27 @@ function syntaxHighlightJson(json: string): JSX.Element[] {
   return elements;
 }
 
+function CopyButton({ text }: { text: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error('Failed to copy:', err);
+    }
+  };
+
+  return (
+    <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={handleCopy}>
+      {copied ? 'Copied!' : 'Copy'}
+    </button>
+  );
+}
+
 function JsonViewer({ data, label }: { data: unknown; label: string }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -103,13 +125,17 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
 
   // Parse string data if it looks like JSON
   let parsedData = data;
+  let isJson = false;
   if (typeof data === 'string') {
     try {
       parsedData = JSON.parse(data);
+      isJson = true;
     } catch {
       // Not valid JSON, keep as string
       parsedData = data;
     }
+  } else if (typeof data === 'object') {
+    isJson = true;
   }
 
   const content = typeof parsedData === 'string' ? parsedData : JSON.stringify(parsedData, null, 2);
@@ -117,17 +143,23 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
 
   if (!isLong) {
     return (
-      <code className="json-inline json-highlighted">
-        {syntaxHighlightJson(content.length > 100 ? content.substring(0, 100) + '...' : content)}
-      </code>
+      <div className="json-inline-wrapper">
+        <code className="json-inline json-highlighted">
+          {syntaxHighlightJson(content.length > 100 ? content.substring(0, 100) + '...' : content)}
+        </code>
+        {isJson && <CopyButton text={content} />}
+      </div>
     );
   }
 
   return (
     <div className="json-viewer">
-      <button className="json-toggle" onClick={() => setExpanded(!expanded)}>
-        {expanded ? 'Hide' : 'View'} {label}
-      </button>
+      <div className="json-viewer-header">
+        <button className="json-toggle" onClick={() => setExpanded(!expanded)}>
+          {expanded ? 'Hide' : 'View'} {label}
+        </button>
+        {isJson && <CopyButton text={content} />}
+      </div>
       {expanded && (
         <pre className="json-content json-highlighted">{syntaxHighlightJson(content)}</pre>
       )}
@@ -355,6 +387,7 @@ function LogRow({ log, onDelete, timezone }: { log: Log; onDelete: (id: number) 
         <td><LevelBadge level={log.level} /></td>
         <td><CategoryBadge category={log.category} /></td>
         <td className="user-id">{log.user_id}</td>
+        <td className="device-id">{log.device_id || '—'}</td>
         <td><EnvironmentBadge env={log.environment} /></td>
         <td className="message-cell" title={log.message}>{log.message}</td>
         <td><HttpMethodBadge method={log.http_method} /></td>
@@ -373,7 +406,7 @@ function LogRow({ log, onDelete, timezone }: { log: Log; onDelete: (id: number) 
       </tr>
       {expanded && (
         <tr className="log-details-row">
-          <td colSpan={12}>
+          <td colSpan={13}>
             <div className="log-details">
               {/* Full message section */}
               <div className="log-detail-section log-detail-message">
@@ -422,6 +455,7 @@ export default function App() {
   const [storage, setStorage] = useState<Storage | null>(null);
   const [archives, setArchives] = useState<Archive[]>([]);
   const [users, setUsers] = useState<string[]>([]);
+  const [devices, setDevices] = useState<string[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
@@ -429,6 +463,7 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [filters, setFilters] = useState<Filters>({
     user_id: '',
+    device_id: '',
     environment: '',
     search: '',
     level: '',
@@ -460,10 +495,11 @@ export default function App() {
       setLoading(true);
       setError(null);
 
-      const [logsData, statsData, usersData, categoriesData, storageData, archivesData] = await Promise.all([
+      const [logsData, statsData, usersData, devicesData, categoriesData, storageData, archivesData] = await Promise.all([
         fetchLogs(filters, ITEMS_PER_PAGE, page * ITEMS_PER_PAGE),
         fetchStats(),
         fetchUsers(),
+        fetchDevices(),
         fetchCategories(),
         fetchStorage(),
         fetchArchives(),
@@ -473,6 +509,7 @@ export default function App() {
       setTotal(logsData.total);
       setStats(statsData);
       setUsers(usersData);
+      setDevices(devicesData);
       setCategories(categoriesData);
       setStorage(storageData);
       setArchives(archivesData);
@@ -502,6 +539,7 @@ export default function App() {
   const clearFilters = () => {
     setFilters({
       user_id: '',
+      device_id: '',
       environment: '',
       search: '',
       level: '',
@@ -635,6 +673,15 @@ export default function App() {
               ))}
             </select>
             <select
+              value={filters.device_id}
+              onChange={(e) => handleFilterChange('device_id', e.target.value)}
+            >
+              <option value="">All Devices</option>
+              {devices.map((device) => (
+                <option key={device} value={device}>{device}</option>
+              ))}
+            </select>
+            <select
               value={filters.environment}
               onChange={(e) => handleFilterChange('environment', e.target.value)}
             >
@@ -672,6 +719,7 @@ export default function App() {
                       <th className="col-level">Level</th>
                       <th className="col-category">Category</th>
                       <th className="col-user">User</th>
+                      <th className="col-device">Device</th>
                       <th className="col-env">Env</th>
                       <th className="col-message resizable">Message</th>
                       <th className="col-method">Method</th>
