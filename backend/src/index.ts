@@ -280,6 +280,81 @@ app.delete('/logs/:id', async (c) => {
   }
 });
 
+// Bulk delete logs with filters
+app.post('/logs/bulk-delete', async (c) => {
+  try {
+    const body = await c.req.json<{
+      user_id?: string;
+      device_id?: string;
+      category?: string;
+      start_date?: string;
+      end_date?: string;
+    }>();
+
+    const { user_id, device_id, category, start_date, end_date } = body;
+
+    // At least one filter must be provided
+    if (!user_id && !device_id && !category && !start_date && !end_date) {
+      return c.json({ error: 'At least one filter is required for bulk delete' }, 400);
+    }
+
+    // Build the WHERE clause
+    let query = 'DELETE FROM logs WHERE 1=1';
+    const params: string[] = [];
+
+    if (user_id) {
+      query += ' AND user_id = ?';
+      params.push(user_id);
+    }
+
+    if (device_id) {
+      query += ' AND device_id = ?';
+      params.push(device_id);
+    }
+
+    if (category) {
+      query += ' AND category = ?';
+      params.push(category);
+    }
+
+    if (start_date) {
+      query += ' AND DATE(created_at) >= ?';
+      params.push(start_date);
+    }
+
+    if (end_date) {
+      query += ' AND DATE(created_at) <= ?';
+      params.push(end_date);
+    }
+
+    // First count how many will be deleted
+    const countQuery = query.replace('DELETE FROM logs', 'SELECT COUNT(*) as count FROM logs');
+    const countResult = await c.env.DB.prepare(countQuery)
+      .bind(...params)
+      .first<{ count: number }>();
+
+    const countToDelete = countResult?.count || 0;
+
+    if (countToDelete === 0) {
+      return c.json({ success: true, deleted: 0, message: 'No logs matched the criteria' });
+    }
+
+    // Perform the delete
+    const result = await c.env.DB.prepare(query)
+      .bind(...params)
+      .run();
+
+    return c.json({
+      success: true,
+      deleted: result.meta.changes,
+      message: `Successfully deleted ${result.meta.changes} logs`,
+    });
+  } catch (error) {
+    console.error('Error bulk deleting logs:', error);
+    return c.json({ error: 'Failed to bulk delete logs' }, 500);
+  }
+});
+
 // Get recent logs by device_id and user_id for the last N hours
 app.get('/logs/recent', async (c) => {
   try {

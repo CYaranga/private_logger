@@ -58,6 +58,33 @@ export async function deleteLog(id: number): Promise<void> {
   if (!response.ok) throw new Error('Failed to delete log');
 }
 
+export interface BulkDeleteParams {
+  user_id?: string;
+  device_id?: string;
+  category?: string;
+  start_date?: string;
+  end_date?: string;
+}
+
+export interface BulkDeleteResult {
+  success: boolean;
+  deleted: number;
+  message: string;
+}
+
+export async function bulkDeleteLogs(params: BulkDeleteParams): Promise<BulkDeleteResult> {
+  const response = await fetch(`${API_BASE}/logs/bulk-delete`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.error || 'Failed to bulk delete logs');
+  }
+  return response.json();
+}
+
 export async function fetchStorage(): Promise<Storage> {
   const response = await fetch(`${API_BASE}/storage`);
   if (!response.ok) throw new Error('Failed to fetch storage');

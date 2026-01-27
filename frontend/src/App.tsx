@@ -8,12 +8,14 @@ import {
   fetchCategories,
   fetchDevices,
   deleteLog,
+  bulkDeleteLogs,
   fetchStorage,
   fetchArchives,
   runArchive,
   deleteArchive,
   getArchiveDownloadUrl,
   getExportAllUrl,
+  type BulkDeleteParams,
 } from './api';
 
 const BATCH_SIZE = 50;
@@ -373,6 +375,136 @@ function StatsCards({ stats }: { stats: Stats | null }) {
   );
 }
 
+function BulkDeleteModal({
+  users,
+  devices,
+  categories,
+  onClose,
+  onDelete,
+}: {
+  users: string[];
+  devices: string[];
+  categories: string[];
+  onClose: () => void;
+  onDelete: (params: BulkDeleteParams) => Promise<void>;
+}) {
+  const [params, setParams] = useState<BulkDeleteParams>({});
+  const [loading, setLoading] = useState(false);
+
+  const hasFilters = params.user_id || params.device_id || params.category || params.start_date || params.end_date;
+
+  const handleDelete = async () => {
+    if (!hasFilters) return;
+
+    const filterDesc = [
+      params.user_id && `User: ${params.user_id}`,
+      params.device_id && `Device: ${params.device_id}`,
+      params.category && `Category: ${params.category}`,
+      params.start_date && `From: ${params.start_date}`,
+      params.end_date && `To: ${params.end_date}`,
+    ].filter(Boolean).join(', ');
+
+    if (!confirm(`Are you sure you want to delete all logs matching:\n\n${filterDesc}\n\nThis action cannot be undone!`)) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await onDelete(params);
+      onClose();
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-header">
+          <h2>Bulk Delete Logs</h2>
+          <button className="modal-close" onClick={onClose}>&times;</button>
+        </div>
+        <div className="modal-body">
+          <p className="modal-warning">
+            Select filters to delete multiple logs at once. At least one filter is required.
+          </p>
+
+          <div className="bulk-delete-filters">
+            <div className="filter-group">
+              <label>User</label>
+              <select
+                value={params.user_id || ''}
+                onChange={(e) => setParams({ ...params, user_id: e.target.value || undefined })}
+              >
+                <option value="">All Users</option>
+                {users.map((user) => (
+                  <option key={user} value={user}>{user}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="filter-group">
+              <label>Device</label>
+              <select
+                value={params.device_id || ''}
+                onChange={(e) => setParams({ ...params, device_id: e.target.value || undefined })}
+              >
+                <option value="">All Devices</option>
+                {devices.map((device) => (
+                  <option key={device} value={device}>{device}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="filter-group">
+              <label>Category</label>
+              <select
+                value={params.category || ''}
+                onChange={(e) => setParams({ ...params, category: e.target.value || undefined })}
+              >
+                <option value="">All Categories</option>
+                {categories.map((cat) => (
+                  <option key={cat} value={cat}>{cat}</option>
+                ))}
+              </select>
+            </div>
+
+            <div className="filter-group">
+              <label>Start Date</label>
+              <input
+                type="date"
+                value={params.start_date || ''}
+                onChange={(e) => setParams({ ...params, start_date: e.target.value || undefined })}
+              />
+            </div>
+
+            <div className="filter-group">
+              <label>End Date</label>
+              <input
+                type="date"
+                value={params.end_date || ''}
+                onChange={(e) => setParams({ ...params, end_date: e.target.value || undefined })}
+              />
+            </div>
+          </div>
+        </div>
+        <div className="modal-footer">
+          <button className="btn btn-secondary" onClick={onClose} disabled={loading}>
+            Cancel
+          </button>
+          <button
+            className="btn btn-danger"
+            onClick={handleDelete}
+            disabled={!hasFilters || loading}
+          >
+            {loading ? 'Deleting...' : 'Delete Matching Logs'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ArchivesSection({
   archives,
   onRunArchive,
@@ -574,6 +706,7 @@ export default function App() {
   const [userTimezone, setUserTimezone] = useState<string | undefined>(undefined);
   const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(getStoredColumnWidths);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
+  const [showBulkDelete, setShowBulkDelete] = useState(false);
   const listRef = useRef<List>(null);
 
   const handleColumnResize = useCallback((key: ColumnKey, width: number) => {
@@ -730,6 +863,17 @@ export default function App() {
     }
   };
 
+  const handleBulkDelete = async (params: BulkDeleteParams) => {
+    try {
+      const result = await bulkDeleteLogs(params);
+      alert(result.message);
+      loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to bulk delete logs');
+      throw err;
+    }
+  };
+
   return (
     <div className="container">
       <header className="header">
@@ -834,6 +978,9 @@ export default function App() {
                 Clear Filters
               </button>
             )}
+            <button className="btn btn-danger" onClick={() => setShowBulkDelete(true)}>
+              Bulk Delete
+            </button>
           </div>
 
           {loading && logs.length === 0 ? (
@@ -927,6 +1074,16 @@ export default function App() {
           onRunArchive={handleRunArchive}
           onDelete={handleDeleteArchive}
           timezone={userTimezone}
+        />
+      )}
+
+      {showBulkDelete && (
+        <BulkDeleteModal
+          users={users}
+          devices={devices}
+          categories={categories}
+          onClose={() => setShowBulkDelete(false)}
+          onDelete={handleBulkDelete}
         />
       )}
     </div>
