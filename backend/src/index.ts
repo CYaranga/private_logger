@@ -1,12 +1,123 @@
-import { Hono } from 'hono';
+import { Hono, type Context, type Next } from 'hono';
 import { cors } from 'hono/cors';
+import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 
 type Bindings = {
   DB: D1Database;
 };
 
+type User = {
+  id: number;
+  username: string;
+  password_hash: string;
+  created_at: string;
+};
+
+type Session = {
+  id: string;
+  user_id: number;
+  expires_at: string;
+  created_at: string;
+};
+
+// Auth helper functions
+async function hashPassword(password: string): Promise<string> {
+  const encoder = new TextEncoder();
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const passwordBuffer = encoder.encode(password);
+
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    passwordBuffer,
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+
+  const hashArray = new Uint8Array(derivedBits);
+  const saltHex = Array.from(salt).map(b => b.toString(16).padStart(2, '0')).join('');
+  const hashHex = Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join('');
+
+  return `${saltHex}:${hashHex}`;
+}
+
+async function verifyPassword(password: string, storedHash: string): Promise<boolean> {
+  const [saltHex, hashHex] = storedHash.split(':');
+  if (!saltHex || !hashHex) return false;
+
+  const salt = new Uint8Array(saltHex.match(/.{2}/g)!.map(byte => parseInt(byte, 16)));
+  const encoder = new TextEncoder();
+  const passwordBuffer = encoder.encode(password);
+
+  const keyMaterial = await crypto.subtle.importKey(
+    'raw',
+    passwordBuffer,
+    'PBKDF2',
+    false,
+    ['deriveBits']
+  );
+
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: 'PBKDF2',
+      salt: salt,
+      iterations: 100000,
+      hash: 'SHA-256',
+    },
+    keyMaterial,
+    256
+  );
+
+  const hashArray = new Uint8Array(derivedBits);
+  const computedHashHex = Array.from(hashArray).map(b => b.toString(16).padStart(2, '0')).join('');
+
+  return computedHashHex === hashHex;
+}
+
+function generateSessionToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function validateSession(db: D1Database, sessionId: string): Promise<User | null> {
+  const session = await db.prepare(
+    `SELECT s.*, u.id as user_id, u.username, u.password_hash, u.created_at as user_created_at
+     FROM sessions s
+     JOIN users u ON s.user_id = u.id
+     WHERE s.id = ? AND s.expires_at > datetime('now')`
+  )
+    .bind(sessionId)
+    .first<{ user_id: number; username: string; password_hash: string; user_created_at: string }>();
+
+  if (!session) return null;
+
+  return {
+    id: session.user_id,
+    username: session.username,
+    password_hash: session.password_hash,
+    created_at: session.user_created_at,
+  };
+}
+
+async function cleanExpiredSessions(db: D1Database): Promise<void> {
+  await db.prepare("DELETE FROM sessions WHERE expires_at <= datetime('now')").run();
+}
+
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'HEAD';
+
+type LogSource = 'ios' | 'android' | 'web' | 'desktop' | 'backend' | 'simulator' | 'cli' | 'api' | 'watch' | 'tv' | 'extension' | 'iot';
 
 type Log = {
   id: number;
@@ -15,6 +126,7 @@ type Log = {
   message: string;
   metadata: string | null;
   environment: 'dev' | 'test' | 'prod';
+  source: LogSource | null;
   created_at: string;
   level: LogLevel;
   category: string;
@@ -40,6 +152,7 @@ type CreateLogInput = {
   message: string;
   metadata?: Record<string, unknown>;
   environment?: 'dev' | 'test' | 'prod';
+  source?: LogSource;
   level?: LogLevel;
   category?: string;
   http_method?: HttpMethod;
@@ -60,15 +173,143 @@ const app = new Hono<{ Bindings: Bindings }>();
 
 // Enable CORS for frontend
 app.use('/*', cors({
-  origin: '*',
+  origin: (origin) => {
+    if (!origin) return null;
+    if (origin === 'https://chrisyaranga.dev') return origin;
+    if (/^http:\/\/localhost:300\d$/.test(origin)) return origin;
+    if (origin === 'http://localhost:5173') return origin;
+    return null;
+  },
   allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowHeaders: ['Content-Type'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
 }));
 
 // Health check
 app.get('/', (c) => {
   return c.json({ status: 'ok', service: 'private-logger-api', version: '2.0.0' });
 });
+
+// Auth endpoints (no authentication required)
+app.post('/auth/login', async (c) => {
+  try {
+    const body = await c.req.json<{ username: string; password: string }>();
+
+    if (!body.username || !body.password) {
+      return c.json({ error: 'Username and password are required' }, 400);
+    }
+
+    const user = await c.env.DB.prepare('SELECT * FROM users WHERE username = ?')
+      .bind(body.username)
+      .first<User>();
+
+    if (!user) {
+      return c.json({ error: 'Invalid credentials' }, 401);
+    }
+
+    const isValid = await verifyPassword(body.password, user.password_hash);
+    if (!isValid) {
+      return c.json({ error: 'Invalid credentials' }, 401);
+    }
+
+    // Clean up expired sessions
+    await cleanExpiredSessions(c.env.DB);
+
+    // Create new session (24 hours expiry)
+    const sessionToken = generateSessionToken();
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    await c.env.DB.prepare(
+      'INSERT INTO sessions (id, user_id, expires_at) VALUES (?, ?, ?)'
+    )
+      .bind(sessionToken, user.id, expiresAt)
+      .run();
+
+    // Set HTTP-only cookie
+    setCookie(c, 'session', sessionToken, {
+      httpOnly: true,
+      secure: true,
+      sameSite: 'None',
+      maxAge: 24 * 60 * 60,
+      path: '/',
+    });
+
+    return c.json({
+      success: true,
+      user: { id: user.id, username: user.username },
+      token: sessionToken,
+      expiresAt,
+    });
+  } catch (error) {
+    console.error('Login error:', error);
+    return c.json({ error: 'Login failed' }, 500);
+  }
+});
+
+app.post('/auth/logout', async (c) => {
+  try {
+    const sessionToken = getCookie(c, 'session') || c.req.header('Authorization')?.replace('Bearer ', '');
+
+    if (sessionToken) {
+      await c.env.DB.prepare('DELETE FROM sessions WHERE id = ?')
+        .bind(sessionToken)
+        .run();
+
+      deleteCookie(c, 'session', { path: '/' });
+    }
+
+    return c.json({ success: true, message: 'Logged out' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    return c.json({ error: 'Logout failed' }, 500);
+  }
+});
+
+app.get('/auth/verify', async (c) => {
+  try {
+    const sessionToken = getCookie(c, 'session') || c.req.header('Authorization')?.replace('Bearer ', '');
+
+    if (!sessionToken) {
+      return c.json({ authenticated: false }, 401);
+    }
+
+    const user = await validateSession(c.env.DB, sessionToken);
+
+    if (!user) {
+      return c.json({ authenticated: false }, 401);
+    }
+
+    return c.json({
+      authenticated: true,
+      user: { id: user.id, username: user.username },
+    });
+  } catch (error) {
+    console.error('Verify error:', error);
+    return c.json({ authenticated: false }, 401);
+  }
+});
+
+// Auth middleware for protected routes
+const authMiddleware = async (c: Context<{ Bindings: Bindings }>, next: Next) => {
+  const sessionToken = getCookie(c, 'session') || c.req.header('Authorization')?.replace('Bearer ', '');
+
+  if (!sessionToken) {
+    return c.json({ error: 'Authentication required' }, 401);
+  }
+
+  const user = await validateSession(c.env.DB, sessionToken);
+
+  if (!user) {
+    return c.json({ error: 'Invalid or expired session' }, 401);
+  }
+
+  // Store user in context for later use
+  c.set('user' as never, user as never);
+  await next();
+};
+
+// Auth middleware is available but not applied to API routes.
+// Authentication is handled on the frontend side only.
 
 // Create a new log entry
 app.post('/logs', async (c) => {
@@ -81,6 +322,7 @@ app.post('/logs', async (c) => {
 
     const metadata = body.metadata ? JSON.stringify(body.metadata) : null;
     const environment = body.environment || 'dev';
+    const source = body.source || null;
     const level = body.level || 'info';
     const category = body.category || 'GENERAL';
     const device_id = body.device_id || null;
@@ -96,10 +338,10 @@ app.post('/logs', async (c) => {
     const duration_ms = body.duration_ms ?? null;
 
     const result = await c.env.DB.prepare(
-      `INSERT INTO logs (user_id, device_id, message, metadata, environment, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
+      `INSERT INTO logs (user_id, device_id, message, metadata, environment, source, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
     )
-      .bind(body.user_id, device_id, body.message, metadata, environment, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
+      .bind(body.user_id, device_id, body.message, metadata, environment, source, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
       .first<Log>();
 
     return c.json({ success: true, log: result }, 201);
@@ -133,6 +375,7 @@ app.get('/logs', async (c) => {
     const userId = c.req.query('user_id');
     const deviceId = c.req.query('device_id');
     const environment = c.req.query('environment');
+    const source = c.req.query('source');
     const limit = parseInt(c.req.query('limit') || '100');
     const offset = parseInt(c.req.query('offset') || '0');
     const search = c.req.query('search');
@@ -158,6 +401,11 @@ app.get('/logs', async (c) => {
       params.push(environment);
     }
 
+    if (source) {
+      query += ' AND source = ?';
+      params.push(source);
+    }
+
     if (level) {
       query += ' AND level = ?';
       params.push(level);
@@ -174,8 +422,8 @@ app.get('/logs', async (c) => {
     }
 
     if (search) {
-      query += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ? OR device_id LIKE ?)';
-      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      query += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ? OR device_id LIKE ? OR source LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     query += ' ORDER BY created_at DESC LIMIT ? OFFSET ?';
@@ -204,6 +452,11 @@ app.get('/logs', async (c) => {
       countParams.push(environment);
     }
 
+    if (source) {
+      countQuery += ' AND source = ?';
+      countParams.push(source);
+    }
+
     if (level) {
       countQuery += ' AND level = ?';
       countParams.push(level);
@@ -220,8 +473,8 @@ app.get('/logs', async (c) => {
     }
 
     if (search) {
-      countQuery += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ? OR device_id LIKE ?)';
-      countParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+      countQuery += ' AND (message LIKE ? OR metadata LIKE ? OR endpoint LIKE ? OR request_data LIKE ? OR response_data LIKE ? OR device_id LIKE ? OR source LIKE ?)';
+      countParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
     const countResult = await c.env.DB.prepare(countQuery)
@@ -444,6 +697,20 @@ app.get('/devices', async (c) => {
   }
 });
 
+// Get unique sources for filtering
+app.get('/sources', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      'SELECT DISTINCT source FROM logs WHERE source IS NOT NULL ORDER BY source'
+    ).all<{ source: string }>();
+
+    return c.json({ sources: results?.map(r => r.source) || [] });
+  } catch (error) {
+    console.error('Error fetching sources:', error);
+    return c.json({ error: 'Failed to fetch sources' }, 500);
+  }
+});
+
 // Get log statistics including storage info
 app.get('/stats', async (c) => {
   try {
@@ -461,6 +728,10 @@ app.get('/stats', async (c) => {
     const byCategory = await c.env.DB.prepare(
       'SELECT category, COUNT(*) as count FROM logs GROUP BY category ORDER BY count DESC LIMIT 10'
     ).all<{ category: string; count: number }>();
+
+    const bySource = await c.env.DB.prepare(
+      'SELECT source, COUNT(*) as count FROM logs WHERE source IS NOT NULL GROUP BY source ORDER BY count DESC'
+    ).all<{ source: string; count: number }>();
 
     const uniqueUsers = await c.env.DB.prepare(
       'SELECT COUNT(DISTINCT user_id) as count FROM logs'
@@ -491,6 +762,7 @@ app.get('/stats', async (c) => {
       byEnvironment: byEnvironment.results || [],
       byLevel: byLevel.results || [],
       byCategory: byCategory.results || [],
+      bySource: bySource.results || [],
       apiCalls: apiCallStats?.count || 0,
       errorCount: errorCount?.count || 0,
       archives: {
