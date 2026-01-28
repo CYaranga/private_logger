@@ -1,5 +1,6 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'HEAD';
+export type LogSource = 'ios' | 'android' | 'web' | 'desktop' | 'backend' | 'simulator' | 'cli' | 'api' | 'watch' | 'tv' | 'extension' | 'iot';
 
 export interface Log {
   id: number;
@@ -8,6 +9,7 @@ export interface Log {
   message: string;
   metadata: Record<string, unknown> | null;
   environment: 'dev' | 'test' | 'prod';
+  source: LogSource | null;
   created_at: string;
   level: LogLevel;
   category: string;
@@ -33,6 +35,7 @@ export interface Stats {
   byEnvironment: { environment: string; count: number }[];
   byLevel: { level: string; count: number }[];
   byCategory: { category: string; count: number }[];
+  bySource: { source: string; count: number }[];
   apiCalls: number;
   errorCount: number;
   archives: {
@@ -63,6 +66,7 @@ export interface Filters {
   user_id: string;
   device_id: string;
   environment: string;
+  source: string;
   search: string;
   level: string;
   category: string;
