@@ -1,5 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { FixedSizeList as List, ListOnItemsRenderedProps, ListChildComponentProps } from 'react-window';
+import { useState, useEffect, useCallback } from 'react';
 import type { Log, Stats, Filters, Storage, Archive, LogLevel, HttpMethod } from './types';
 import {
   fetchLogs,
@@ -7,6 +6,7 @@ import {
   fetchUsers,
   fetchCategories,
   fetchDevices,
+  fetchSources,
   deleteLog,
   bulkDeleteLogs,
   fetchStorage,
@@ -17,37 +17,52 @@ import {
   getExportAllUrl,
   type BulkDeleteParams,
 } from './api';
+import { useAuth } from './AuthContext';
 
-const BATCH_SIZE = 50;
-const ROW_HEIGHT = 48;
+const PAGE_SIZE_OPTIONS = [25, 50, 200] as const;
 
-// Column configuration for resizing
-type ColumnKey = 'id' | 'timestamp' | 'level' | 'category' | 'user' | 'device' | 'env' | 'message' | 'method' | 'endpoint' | 'status' | 'duration' | 'actions';
+// Hoisted module-level constants — avoids re-creating on every render/call
+const SKELETON_CELL_WIDTHS = [40, 80, 50, 70, 55, 75, 40, 60, 180, 55, 130, 40, 55, 40] as const;
+const COLUMN_WIDTHS_KEY = 'columnWidths:v1';
+
+// Hoisted regex — /g flag maintains lastIndex; reset before each use
+const JSON_TOKEN_REGEX = /("(?:\\.|[^"\\])*")\s*:|("(?:\\.|[^"\\])*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b)|(\bnull\b)|([\[\]{}])|([,:])|(\s+)/g;
+
+type ColumnKey = 'id' | 'timestamp' | 'level' | 'category' | 'user' | 'device' | 'env' | 'source' | 'message' | 'method' | 'endpoint' | 'status' | 'duration' | 'actions';
 
 const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   id: 60,
-  timestamp: 160,
+  timestamp: 120,
   level: 70,
   category: 90,
   user: 80,
   device: 100,
   env: 60,
+  source: 80,
   message: 250,
   method: 70,
   endpoint: 200,
   status: 60,
   duration: 80,
-  actions: 80,
+  actions: 70,
 };
 
 function getStoredColumnWidths(): Record<ColumnKey, number> {
   try {
-    const stored = localStorage.getItem('columnWidths');
+    const stored = localStorage.getItem(COLUMN_WIDTHS_KEY);
     if (stored) {
-      return { ...DEFAULT_COLUMN_WIDTHS, ...JSON.parse(stored) };
+      const parsed = JSON.parse(stored);
+      if (typeof parsed === 'object' && parsed !== null) {
+        const result = { ...DEFAULT_COLUMN_WIDTHS };
+        for (const key of Object.keys(DEFAULT_COLUMN_WIDTHS) as ColumnKey[]) {
+          const val = parsed[key];
+          if (typeof val === 'number' && val >= 40) result[key] = val;
+        }
+        return result;
+      }
     }
   } catch {
-    // Ignore parse errors
+    // ignore corrupt data
   }
   return DEFAULT_COLUMN_WIDTHS;
 }
@@ -64,6 +79,21 @@ function formatTimestamp(timestamp: string, timezone?: string): string {
     hour12: false,
     timeZone: timezone,
   });
+}
+
+function formatRelativeTime(timestamp: string): string {
+  const now = Date.now();
+  const then = new Date(timestamp).getTime();
+  const diff = now - then;
+  const s = Math.floor(diff / 1000);
+  if (s < 60) return `${s}s ago`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.floor(h / 24);
+  if (d < 30) return `${d}d ago`;
+  return formatTimestamp(timestamp);
 }
 
 function formatBytes(bytes: number): string {
@@ -83,24 +113,16 @@ function formatDuration(ms: number | null): string {
 function syntaxHighlightJson(json: string): JSX.Element[] {
   const elements: JSX.Element[] = [];
   let key = 0;
-
-  // Regex to match JSON tokens
-  const tokenRegex = /("(?:\\.|[^"\\])*")\s*:|("(?:\\.|[^"\\])*")|(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)|(\btrue\b|\bfalse\b)|(\bnull\b)|([\[\]{}])|([,:])|(\s+)/g;
-
+  JSON_TOKEN_REGEX.lastIndex = 0; // reset global regex state before use
   let match;
   let lastIndex = 0;
-
-  while ((match = tokenRegex.exec(json)) !== null) {
-    // Add any unmatched text before this match
+  while ((match = JSON_TOKEN_REGEX.exec(json)) !== null) {
     if (match.index > lastIndex) {
       elements.push(<span key={key++}>{json.slice(lastIndex, match.index)}</span>);
     }
-    lastIndex = tokenRegex.lastIndex;
-
+    lastIndex = JSON_TOKEN_REGEX.lastIndex;
     const [fullMatch, keyWithColon, stringVal, numberVal, boolVal, nullVal, bracket, punctuation, whitespace] = match;
-
     if (keyWithColon) {
-      // Property key (remove the colon, we'll add it separately)
       const keyName = keyWithColon.slice(0, -1).trim();
       elements.push(<span key={key++} className="json-key">{keyName}</span>);
     } else if (stringVal) {
@@ -121,20 +143,30 @@ function syntaxHighlightJson(json: string): JSX.Element[] {
       elements.push(<span key={key++}>{fullMatch}</span>);
     }
   }
-
-  // Add any remaining text
   if (lastIndex < json.length) {
     elements.push(<span key={key++}>{json.slice(lastIndex)}</span>);
   }
-
   return elements;
+}
+
+function RelativeTimestamp({ timestamp, timezone }: { timestamp: string; timezone?: string }) {
+  const [, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <span className="rel-time">
+      {formatRelativeTime(timestamp)}
+      <span className="rel-time-tooltip">{formatTimestamp(timestamp, timezone)}</span>
+    </span>
+  );
 }
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
-
-  const handleCopy = async (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleCopy = async (ev: React.MouseEvent) => {
+    ev.stopPropagation();
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -143,7 +175,6 @@ function CopyButton({ text }: { text: string }) {
       console.error('Failed to copy:', err);
     }
   };
-
   return (
     <button className={`copy-btn ${copied ? 'copied' : ''}`} onClick={handleCopy}>
       {copied ? 'Copied!' : 'Copy'}
@@ -153,12 +184,9 @@ function CopyButton({ text }: { text: string }) {
 
 function JsonViewer({ data, label }: { data: unknown; label: string }) {
   const [expanded, setExpanded] = useState(false);
-
   if (data === null || data === undefined) {
-    return <span style={{ color: 'var(--text-secondary)' }}>—</span>;
+    return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
   }
-
-  // Parse string data if it looks like JSON
   let parsedData = data;
   let isJson = false;
   if (typeof data === 'string') {
@@ -166,16 +194,13 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
       parsedData = JSON.parse(data);
       isJson = true;
     } catch {
-      // Not valid JSON, keep as string
       parsedData = data;
     }
   } else if (typeof data === 'object') {
     isJson = true;
   }
-
   const content = typeof parsedData === 'string' ? parsedData : JSON.stringify(parsedData, null, 2);
   const isLong = content.length > 50;
-
   if (!isLong) {
     return (
       <div className="json-inline-wrapper">
@@ -186,7 +211,6 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
       </div>
     );
   }
-
   return (
     <div className="json-viewer">
       <div className="json-viewer-header">
@@ -203,40 +227,39 @@ function JsonViewer({ data, label }: { data: unknown; label: string }) {
 }
 
 function ResizableHeader({
-  columnKey,
-  label,
-  width,
-  onResize,
+  columnKey, label, width, onResize,
 }: {
   columnKey: ColumnKey;
   label: string;
   width: number;
   onResize: (key: ColumnKey, width: number) => void;
 }) {
-  const handleMouseDown = (e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.clientX;
+  const handleMouseDown = (ev: React.MouseEvent) => {
+    ev.preventDefault();
+    const startX = ev.clientX;
     const startWidth = width;
+    let rafId: number | null = null;
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      const diff = moveEvent.clientX - startX;
-      const newWidth = Math.max(40, startWidth + diff);
-      onResize(columnKey, newWidth);
+      // Throttle high-frequency mousemove to animation frames to avoid layout thrashing
+      if (rafId !== null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => {
+        const diff = moveEvent.clientX - startX;
+        onResize(columnKey, Math.max(40, startWidth + diff));
+      });
     };
-
     const handleMouseUp = () => {
+      if (rafId !== null) cancelAnimationFrame(rafId);
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
-
     document.addEventListener('mousemove', handleMouseMove);
     document.addEventListener('mouseup', handleMouseUp);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
   };
-
   return (
     <th style={{ width: `${width}px`, minWidth: `${width}px`, maxWidth: `${width}px` }}>
       <div className="resizable-header">
@@ -250,43 +273,39 @@ function ResizableHeader({
 function LevelBadge({ level }: { level: LogLevel }) {
   return <span className={`badge badge-level-${level}`}>{level}</span>;
 }
-
 function EnvironmentBadge({ env }: { env: string }) {
   return <span className={`badge badge-${env}`}>{env}</span>;
 }
-
+function SourceBadge({ source }: { source: string | null }) {
+  if (!source) return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
+  return <span className={`badge badge-source badge-source-${source}`}>{source}</span>;
+}
 function HttpMethodBadge({ method }: { method: HttpMethod | null }) {
-  if (!method) return <span style={{ color: 'var(--text-secondary)' }}>—</span>;
+  if (!method) return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
   return <span className={`badge badge-http badge-http-${method.toLowerCase()}`}>{method}</span>;
 }
-
 function StatusCodeBadge({ code }: { code: number | null }) {
-  if (code === null) return <span style={{ color: 'var(--text-secondary)' }}>—</span>;
-
+  if (code === null) return <span style={{ color: 'var(--text-tertiary)' }}>—</span>;
   let className = 'badge-status';
   if (code >= 200 && code < 300) className += ' badge-status-success';
   else if (code >= 300 && code < 400) className += ' badge-status-redirect';
   else if (code >= 400 && code < 500) className += ' badge-status-client-error';
   else if (code >= 500) className += ' badge-status-server-error';
-
   return <span className={`badge ${className}`}>{code}</span>;
 }
-
 function CategoryBadge({ category }: { category: string }) {
   return <span className="badge badge-category">{category}</span>;
 }
 
 function StorageBar({ storage }: { storage: Storage | null }) {
   if (!storage) return null;
-
   const usageColor = storage.warning
     ? 'var(--error)'
     : storage.usage_percent > 50
     ? 'var(--warning)'
     : 'var(--success)';
-
   return (
-    <div className="storage-bar">
+    <div className="storage-bar" style={{ flexDirection: 'column', alignItems: 'stretch', marginBottom: '12px' }}>
       <div className="storage-header">
         <span>Storage: {formatBytes(storage.used_bytes)} / {formatBytes(storage.limit_bytes)}</span>
         <span>{storage.usage_percent.toFixed(2)}%</span>
@@ -294,10 +313,7 @@ function StorageBar({ storage }: { storage: Storage | null }) {
       <div className="storage-track">
         <div
           className="storage-fill"
-          style={{
-            width: `${Math.min(storage.usage_percent, 100)}%`,
-            backgroundColor: usageColor,
-          }}
+          style={{ width: `${Math.min(storage.usage_percent, 100)}%`, backgroundColor: usageColor }}
         />
       </div>
       {storage.warning && (
@@ -311,76 +327,96 @@ function StorageBar({ storage }: { storage: Storage | null }) {
 
 function StatsCards({ stats }: { stats: Stats | null }) {
   if (!stats) return null;
-
-  const envCounts = stats.byEnvironment.reduce(
-    (acc, item) => ({ ...acc, [item.environment]: item.count }),
-    { dev: 0, test: 0, prod: 0 }
-  );
-
   const levelCounts = stats.byLevel?.reduce(
     (acc, item) => ({ ...acc, [item.level]: item.count }),
     { debug: 0, info: 0, warn: 0, error: 0 }
   ) || { debug: 0, info: 0, warn: 0, error: 0 };
-
   const totalAllLogs = stats.total + (stats.archives?.totalLogs || 0);
+  const hasErrors = (stats.errorCount || 0) > 0;
 
   return (
-    <div className="stats-grid">
-      <div className="stat-card">
-        <div className="label">Recent Logs</div>
-        <div className="value">{stats.total.toLocaleString()}</div>
-      </div>
-      <div className="stat-card">
-        <div className="label">Archived Logs</div>
-        <div className="value">{(stats.archives?.totalLogs || 0).toLocaleString()}</div>
-      </div>
-      <div className="stat-card">
-        <div className="label">Total All Time</div>
-        <div className="value">{totalAllLogs.toLocaleString()}</div>
-      </div>
-      <div className="stat-card">
-        <div className="label">Unique Users</div>
-        <div className="value">{stats.uniqueUsers.toLocaleString()}</div>
-      </div>
-      <div className="stat-card">
-        <div className="label">Last 24 Hours</div>
-        <div className="value">{stats.last24Hours.toLocaleString()}</div>
-      </div>
-      <div className="stat-card">
-        <div className="label">API Calls</div>
-        <div className="value">{(stats.apiCalls || 0).toLocaleString()}</div>
-      </div>
-      <div className="stat-card">
-        <div className="label">Errors</div>
-        <div className="value" style={{ color: stats.errorCount > 0 ? 'var(--error)' : 'inherit' }}>
-          {(stats.errorCount || 0).toLocaleString()}
+    <>
+      <div className="stats-primary-row">
+        <div className="stat-card stat-primary">
+          <div className="stat-label">Recent Logs</div>
+          <div className="stat-value">{stats.total.toLocaleString()}</div>
+        </div>
+        <div className="stat-card stat-primary">
+          <div className="stat-label">Last 24 Hours</div>
+          <div className="stat-value">{stats.last24Hours.toLocaleString()}</div>
+        </div>
+        <div className="stat-card stat-primary">
+          <div className="stat-label">API Calls</div>
+          <div className="stat-value">{(stats.apiCalls || 0).toLocaleString()}</div>
+        </div>
+        <div className={`stat-card stat-primary stat-error ${hasErrors ? 'stat-error-pulse' : ''}`}>
+          <div className="stat-label">Errors</div>
+          <div className="stat-value">{(stats.errorCount || 0).toLocaleString()}</div>
         </div>
       </div>
-      <div className="stat-card">
-        <div className="label">Dev / Test / Prod</div>
-        <div className="value" style={{ fontSize: '20px' }}>
-          {envCounts.dev} / {envCounts.test} / {envCounts.prod}
+
+      <div className="stats-secondary-row">
+        <div className="stat-card">
+          <div className="stat-label">Total All Time</div>
+          <div className="stat-value" style={{ fontSize: '18px' }}>{totalAllLogs.toLocaleString()}</div>
         </div>
-      </div>
-      <div className="stat-card">
-        <div className="label">Debug / Info / Warn / Error</div>
-        <div className="value" style={{ fontSize: '16px' }}>
-          <span style={{ color: 'var(--text-secondary)' }}>{levelCounts.debug}</span> /
-          <span style={{ color: 'var(--accent)' }}> {levelCounts.info}</span> /
-          <span style={{ color: 'var(--warning)' }}> {levelCounts.warn}</span> /
-          <span style={{ color: 'var(--error)' }}> {levelCounts.error}</span>
+        <div className="stat-card">
+          <div className="stat-label">Archived</div>
+          <div className="stat-value" style={{ fontSize: '18px' }}>{(stats.archives?.totalLogs || 0).toLocaleString()}</div>
         </div>
+        <div className="stat-card">
+          <div className="stat-label">Unique Users</div>
+          <div className="stat-value" style={{ fontSize: '18px' }}>{stats.uniqueUsers.toLocaleString()}</div>
+        </div>
+        <div className="stat-card">
+          <div className="stat-label">By Level</div>
+          <div style={{ fontSize: '12px', fontFamily: 'var(--font-mono)', marginTop: '6px', lineHeight: '1.8' }}>
+            <span style={{ color: 'var(--text-secondary)' }}>dbg {levelCounts.debug}</span>
+            {' · '}
+            <span style={{ color: 'var(--accent)' }}>inf {levelCounts.info}</span>
+            {' · '}
+            <span style={{ color: 'var(--warning)' }}>wrn {levelCounts.warn}</span>
+            {' · '}
+            <span style={{ color: 'var(--error)' }}>err {levelCounts.error}</span>
+          </div>
+        </div>
+        {stats.bySource && stats.bySource.length > 0 && (
+          <div className="stat-card">
+            <div className="stat-label">By Source</div>
+            <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', marginTop: '6px', lineHeight: '1.9' }}>
+              {stats.bySource.slice(0, 4).map((s, i) => (
+                <span key={s.source}>
+                  {i > 0 && ' · '}
+                  <span style={{ color: 'var(--accent)' }}>{s.source}</span>
+                  <span style={{ color: 'var(--text-secondary)' }}> {s.count}</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
-    </div>
+    </>
+  );
+}
+
+function TableSkeletonRows({ count = 8 }: { count?: number }) {
+  return (
+    <>
+      {Array.from({ length: count }).map((_, i) => (
+        <tr key={i} className="skeleton-row">
+          {SKELETON_CELL_WIDTHS.map((w, j) => (
+            <td key={j}>
+              <div className="skeleton-cell" style={{ width: `${w}%` }} />
+            </td>
+          ))}
+        </tr>
+      ))}
+    </>
   );
 }
 
 function BulkDeleteModal({
-  users,
-  devices,
-  categories,
-  onClose,
-  onDelete,
+  users, devices, categories, onClose, onDelete,
 }: {
   users: string[];
   devices: string[];
@@ -390,12 +426,10 @@ function BulkDeleteModal({
 }) {
   const [params, setParams] = useState<BulkDeleteParams>({});
   const [loading, setLoading] = useState(false);
-
   const hasFilters = params.user_id || params.device_id || params.category || params.start_date || params.end_date;
 
   const handleDelete = async () => {
     if (!hasFilters) return;
-
     const filterDesc = [
       params.user_id && `User: ${params.user_id}`,
       params.device_id && `Device: ${params.device_id}`,
@@ -403,11 +437,7 @@ function BulkDeleteModal({
       params.start_date && `From: ${params.start_date}`,
       params.end_date && `To: ${params.end_date}`,
     ].filter(Boolean).join(', ');
-
-    if (!confirm(`Are you sure you want to delete all logs matching:\n\n${filterDesc}\n\nThis action cannot be undone!`)) {
-      return;
-    }
-
+    if (!confirm(`Delete all logs matching:\n\n${filterDesc}\n\nThis cannot be undone.`)) return;
     setLoading(true);
     try {
       await onDelete(params);
@@ -419,84 +449,48 @@ function BulkDeleteModal({
 
   return (
     <div className="modal-overlay" onClick={onClose}>
-      <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+      <div className="modal-content" onClick={(ev) => ev.stopPropagation()}>
         <div className="modal-header">
           <h2>Bulk Delete Logs</h2>
           <button className="modal-close" onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">
-          <p className="modal-warning">
-            Select filters to delete multiple logs at once. At least one filter is required.
-          </p>
-
+          <p className="modal-warning">Select filters below. At least one filter is required.</p>
           <div className="bulk-delete-filters">
             <div className="filter-group">
               <label>User</label>
-              <select
-                value={params.user_id || ''}
-                onChange={(e) => setParams({ ...params, user_id: e.target.value || undefined })}
-              >
+              <select value={params.user_id || ''} onChange={(ev) => setParams({ ...params, user_id: ev.target.value || undefined })}>
                 <option value="">All Users</option>
-                {users.map((user) => (
-                  <option key={user} value={user}>{user}</option>
-                ))}
+                {users.map((u) => <option key={u} value={u}>{u}</option>)}
               </select>
             </div>
-
             <div className="filter-group">
               <label>Device</label>
-              <select
-                value={params.device_id || ''}
-                onChange={(e) => setParams({ ...params, device_id: e.target.value || undefined })}
-              >
+              <select value={params.device_id || ''} onChange={(ev) => setParams({ ...params, device_id: ev.target.value || undefined })}>
                 <option value="">All Devices</option>
-                {devices.map((device) => (
-                  <option key={device} value={device}>{device}</option>
-                ))}
+                {devices.map((d) => <option key={d} value={d}>{d}</option>)}
               </select>
             </div>
-
             <div className="filter-group">
               <label>Category</label>
-              <select
-                value={params.category || ''}
-                onChange={(e) => setParams({ ...params, category: e.target.value || undefined })}
-              >
+              <select value={params.category || ''} onChange={(ev) => setParams({ ...params, category: ev.target.value || undefined })}>
                 <option value="">All Categories</option>
-                {categories.map((cat) => (
-                  <option key={cat} value={cat}>{cat}</option>
-                ))}
+                {categories.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
               </select>
             </div>
-
             <div className="filter-group">
               <label>Start Date</label>
-              <input
-                type="date"
-                value={params.start_date || ''}
-                onChange={(e) => setParams({ ...params, start_date: e.target.value || undefined })}
-              />
+              <input type="date" value={params.start_date || ''} onChange={(ev) => setParams({ ...params, start_date: ev.target.value || undefined })} />
             </div>
-
             <div className="filter-group">
               <label>End Date</label>
-              <input
-                type="date"
-                value={params.end_date || ''}
-                onChange={(e) => setParams({ ...params, end_date: e.target.value || undefined })}
-              />
+              <input type="date" value={params.end_date || ''} onChange={(ev) => setParams({ ...params, end_date: ev.target.value || undefined })} />
             </div>
           </div>
         </div>
         <div className="modal-footer">
-          <button className="btn btn-secondary" onClick={onClose} disabled={loading}>
-            Cancel
-          </button>
-          <button
-            className="btn btn-danger"
-            onClick={handleDelete}
-            disabled={!hasFilters || loading}
-          >
+          <button className="btn btn-secondary" onClick={onClose} disabled={loading}>Cancel</button>
+          <button className="btn btn-danger" onClick={handleDelete} disabled={!hasFilters || loading}>
             {loading ? 'Deleting...' : 'Delete Matching Logs'}
           </button>
         </div>
@@ -506,10 +500,7 @@ function BulkDeleteModal({
 }
 
 function ArchivesSection({
-  archives,
-  onRunArchive,
-  onDelete,
-  timezone,
+  archives, onRunArchive, onDelete, timezone,
 }: {
   archives: Archive[];
   onRunArchive: () => void;
@@ -521,13 +512,9 @@ function ArchivesSection({
       <div className="archives-header">
         <h2>Archives</h2>
         <div className="archives-actions">
-          <button className="btn btn-secondary" onClick={onRunArchive}>
-            Archive Now
-          </button>
+          <button className="btn btn-secondary" onClick={onRunArchive}>Archive Now</button>
           {archives.length > 0 && (
-            <a href={getExportAllUrl()} className="btn btn-secondary" download>
-              Export All
-            </a>
+            <a href={getExportAllUrl()} className="btn btn-secondary" download>Export All</a>
           )}
         </div>
       </div>
@@ -536,8 +523,10 @@ function ArchivesSection({
         Download archives before deleting to keep a local backup.
       </p>
       {archives.length === 0 ? (
-        <div className="empty-state" style={{ padding: '40px' }}>
-          No archives yet. Archives will appear here after logs are older than 7 days.
+        <div className="empty-state">
+          <div className="empty-state-icon">[ ]</div>
+          <div className="empty-state-title">No archives yet</div>
+          <div className="empty-state-sub">Archives appear here after logs are older than 7 days</div>
         </div>
       ) : (
         <div className="logs-table">
@@ -554,21 +543,21 @@ function ArchivesSection({
               {archives.map((archive) => (
                 <tr key={archive.id}>
                   <td className="timestamp">{archive.archive_date}</td>
-                  <td>{archive.log_count.toLocaleString()}</td>
+                  <td style={{ fontFamily: 'var(--font-mono)', fontSize: '12px' }}>{archive.log_count.toLocaleString()}</td>
                   <td className="timestamp">{formatTimestamp(archive.created_at, timezone)}</td>
                   <td>
                     <div style={{ display: 'flex', gap: '8px' }}>
                       <a
                         href={getArchiveDownloadUrl(archive.archive_date)}
                         className="btn btn-secondary"
-                        style={{ padding: '6px 12px', fontSize: '12px', textDecoration: 'none' }}
+                        style={{ padding: '4px 10px', fontSize: '11px', textDecoration: 'none' }}
                         download
                       >
                         Download
                       </a>
                       <button
-                        className="btn btn-secondary"
-                        style={{ padding: '6px 12px', fontSize: '12px' }}
+                        className="btn btn-danger"
+                        style={{ padding: '4px 10px', fontSize: '11px' }}
                         onClick={() => onDelete(archive.archive_date)}
                       >
                         Delete
@@ -585,13 +574,8 @@ function ArchivesSection({
   );
 }
 
-function VirtualLogRow({
-  log,
-  onDelete,
-  timezone,
-  columnWidths,
-  isExpanded,
-  onToggleExpand,
+function LogRow({
+  log, onDelete, timezone, columnWidths, isExpanded, onToggleExpand,
 }: {
   log: Log;
   onDelete: (id: number) => void;
@@ -601,7 +585,6 @@ function VirtualLogRow({
   onToggleExpand: () => void;
 }) {
   const isApiCall = log.http_method !== null;
-
   const cellStyle = (key: ColumnKey): React.CSSProperties => ({
     width: `${columnWidths[key]}px`,
     minWidth: `${columnWidths[key]}px`,
@@ -609,77 +592,78 @@ function VirtualLogRow({
     overflow: 'hidden',
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
-    padding: '12px 16px',
-    display: 'inline-block',
-    boxSizing: 'border-box',
-    verticalAlign: 'middle',
   });
 
   return (
-    <div
-      className={`virtual-row log-level-${log.level}`}
-      onClick={onToggleExpand}
-    >
-      <span style={{ ...cellStyle('id'), color: 'var(--text-secondary)' }}>#{log.id}</span>
-      <span style={cellStyle('timestamp')} className="timestamp">{formatTimestamp(log.created_at, timezone)}</span>
-      <span style={cellStyle('level')}><LevelBadge level={log.level} /></span>
-      <span style={cellStyle('category')}><CategoryBadge category={log.category} /></span>
-      <span style={cellStyle('user')} className="user-id">{log.user_id}</span>
-      <span style={cellStyle('device')} className="device-id">{log.device_id || '—'}</span>
-      <span style={cellStyle('env')}><EnvironmentBadge env={log.environment} /></span>
-      <span style={cellStyle('message')} className="message-cell" title={log.message}>{log.message}</span>
-      <span style={cellStyle('method')}><HttpMethodBadge method={log.http_method} /></span>
-      <span style={cellStyle('endpoint')} className="endpoint-cell" title={log.endpoint || ''}>{log.endpoint || '—'}</span>
-      <span style={cellStyle('status')}><StatusCodeBadge code={log.status_code} /></span>
-      <span style={cellStyle('duration')} className="duration-cell">{formatDuration(log.duration_ms)}</span>
-      <span style={cellStyle('actions')}>
-        <button
-          className="btn btn-secondary"
-          style={{ padding: '4px 8px', fontSize: '11px' }}
-          onClick={(e) => { e.stopPropagation(); onDelete(log.id); }}
-        >
-          Delete
-        </button>
-      </span>
+    <>
+      <tr className={`log-row log-level-${log.level}`} onClick={onToggleExpand}>
+        <td style={{ ...cellStyle('id'), color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', fontSize: '11px' }}>#{log.id}</td>
+        <td style={cellStyle('timestamp')}>
+          <RelativeTimestamp timestamp={log.created_at} timezone={timezone} />
+        </td>
+        <td style={cellStyle('level')}><LevelBadge level={log.level} /></td>
+        <td style={cellStyle('category')}><CategoryBadge category={log.category} /></td>
+        <td style={cellStyle('user')} className="user-id">{log.user_id}</td>
+        <td style={cellStyle('device')} className="device-id">{log.device_id || '—'}</td>
+        <td style={cellStyle('env')}><EnvironmentBadge env={log.environment} /></td>
+        <td style={cellStyle('source')}><SourceBadge source={log.source} /></td>
+        <td style={cellStyle('message')} className="message-cell" title={log.message}>{log.message}</td>
+        <td style={cellStyle('method')}><HttpMethodBadge method={log.http_method} /></td>
+        <td style={cellStyle('endpoint')} className="endpoint-cell" title={log.endpoint || ''}>{log.endpoint || '—'}</td>
+        <td style={cellStyle('status')}><StatusCodeBadge code={log.status_code} /></td>
+        <td style={cellStyle('duration')} className="duration-cell">{formatDuration(log.duration_ms)}</td>
+        <td style={cellStyle('actions')}>
+          <button
+            className="btn btn-danger"
+            style={{ padding: '3px 8px', fontSize: '11px' }}
+            onClick={(ev) => { ev.stopPropagation(); onDelete(log.id); }}
+          >
+            Del
+          </button>
+        </td>
+      </tr>
       {isExpanded && (
-        <div className="virtual-row-details" onClick={(e) => e.stopPropagation()}>
-          <div className="log-details">
-            <div className="log-detail-section log-detail-message">
-              <h4>Full Message</h4>
-              <pre className="full-message-content">{log.message}</pre>
-            </div>
-            {isApiCall && log.endpoint && (
-              <div className="log-detail-section">
-                <h4>Full Endpoint</h4>
-                <code className="full-endpoint">{log.endpoint}</code>
+        <tr className="log-details-row">
+          <td colSpan={14} onClick={(ev) => ev.stopPropagation()}>
+            <div className="log-details">
+              <div className="log-detail-section log-detail-message">
+                <h4>Full Message</h4>
+                <pre className="full-message-content">{log.message}</pre>
               </div>
-            )}
-            <div className="log-details-grid">
-              <div className="log-detail-section">
-                <h4>Metadata</h4>
-                <JsonViewer data={log.metadata} label="Metadata" />
-              </div>
-              {isApiCall && (
-                <>
-                  <div className="log-detail-section">
-                    <h4>Request Data</h4>
-                    <JsonViewer data={log.request_data} label="Request" />
-                  </div>
-                  <div className="log-detail-section">
-                    <h4>Response Data</h4>
-                    <JsonViewer data={log.response_data} label="Response" />
-                  </div>
-                </>
+              {isApiCall && log.endpoint && (
+                <div className="log-detail-section">
+                  <h4>Full Endpoint</h4>
+                  <code className="full-endpoint">{log.endpoint}</code>
+                </div>
               )}
+              <div className="log-details-grid">
+                <div className="log-detail-section">
+                  <h4>Metadata</h4>
+                  <JsonViewer data={log.metadata} label="Metadata" />
+                </div>
+                {isApiCall && (
+                  <>
+                    <div className="log-detail-section">
+                      <h4>Request Data</h4>
+                      <JsonViewer data={log.request_data} label="Request" />
+                    </div>
+                    <div className="log-detail-section">
+                      <h4>Response Data</h4>
+                      <JsonViewer data={log.response_data} label="Response" />
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
+          </td>
+        </tr>
       )}
-    </div>
+    </>
   );
 }
 
 export default function App() {
+  const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<'logs' | 'archives'>('logs');
   const [logs, setLogs] = useState<Log[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -687,16 +671,19 @@ export default function App() {
   const [archives, setArchives] = useState<Archive[]>([]);
   const [users, setUsers] = useState<string[]>([]);
   const [devices, setDevices] = useState<string[]>([]);
+  const [sources, setSources] = useState<string[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [perPage, setPerPage] = useState(50);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [hasMore, setHasMore] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [autoRefresh, setAutoRefresh] = useState(true);
   const [filters, setFilters] = useState<Filters>({
     user_id: '',
     device_id: '',
     environment: '',
+    source: '',
     search: '',
     level: '',
     category: '',
@@ -707,12 +694,12 @@ export default function App() {
   const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(getStoredColumnWidths);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [showBulkDelete, setShowBulkDelete] = useState(false);
-  const listRef = useRef<List>(null);
+  const [showMoreFilters, setShowMoreFilters] = useState(false);
 
   const handleColumnResize = useCallback((key: ColumnKey, width: number) => {
     setColumnWidths(prev => {
       const newWidths = { ...prev, [key]: width };
-      localStorage.setItem('columnWidths', JSON.stringify(newWidths));
+      localStorage.setItem(COLUMN_WIDTHS_KEY, JSON.stringify(newWidths));
       return newWidths;
     });
   }, []);
@@ -720,16 +707,12 @@ export default function App() {
   const toggleRowExpanded = useCallback((id: number) => {
     setExpandedRows(prev => {
       const newSet = new Set(prev);
-      if (newSet.has(id)) {
-        newSet.delete(id);
-      } else {
-        newSet.add(id);
-      }
+      if (newSet.has(id)) newSet.delete(id);
+      else newSet.add(id);
       return newSet;
     });
   }, []);
 
-  // Fetch user's timezone from IP geolocation
   useEffect(() => {
     async function fetchTimezone() {
       try {
@@ -739,36 +722,37 @@ export default function App() {
           setUserTimezone(data.timezone);
         }
       } catch {
-        // Fall back to browser's default timezone if API fails
         console.warn('Could not detect timezone from IP, using browser default');
       }
     }
     fetchTimezone();
   }, []);
 
-  // Load initial data
-  const loadData = useCallback(async () => {
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+
+  const loadData = useCallback(async (targetPage?: number) => {
+    const p = targetPage ?? page;
     try {
       setLoading(true);
       setError(null);
       setExpandedRows(new Set());
-
-      const [logsData, statsData, usersData, devicesData, categoriesData, storageData, archivesData] = await Promise.all([
-        fetchLogs(filters, BATCH_SIZE, 0),
+      const offset = (p - 1) * perPage;
+      const [logsData, statsData, usersData, devicesData, sourcesData, categoriesData, storageData, archivesData] = await Promise.all([
+        fetchLogs(filters, perPage, offset),
         fetchStats(),
         fetchUsers(),
         fetchDevices(),
+        fetchSources(),
         fetchCategories(),
         fetchStorage(),
         fetchArchives(),
       ]);
-
       setLogs(logsData.logs);
       setTotal(logsData.total);
-      setHasMore(logsData.logs.length < logsData.total);
       setStats(statsData);
       setUsers(usersData);
       setDevices(devicesData);
+      setSources(sourcesData);
       setCategories(categoriesData);
       setStorage(storageData);
       setArchives(archivesData);
@@ -778,56 +762,33 @@ export default function App() {
     } finally {
       setLoading(false);
     }
-  }, [filters]);
+  }, [filters, page, perPage]);
 
-  // Load more data for infinite scroll
-  const loadMore = useCallback(async () => {
-    if (loadingMore || !hasMore) return;
-
-    try {
-      setLoadingMore(true);
-      const logsData = await fetchLogs(filters, BATCH_SIZE, logs.length);
-
-      setLogs(prev => [...prev, ...logsData.logs]);
-      setHasMore(logs.length + logsData.logs.length < logsData.total);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load more logs');
-    } finally {
-      setLoadingMore(false);
-    }
-  }, [filters, logs.length, loadingMore, hasMore]);
+  useEffect(() => { loadData(); }, [loadData]);
 
   useEffect(() => {
-    loadData();
-  }, [loadData]);
-
-  // Auto-refresh every 30 seconds
-  useEffect(() => {
+    if (!autoRefresh) return;
     const interval = setInterval(loadData, 30000);
     return () => clearInterval(interval);
-  }, [loadData]);
+  }, [loadData, autoRefresh]);
+
+  useEffect(() => { setPage(1); }, [filters, perPage]);
 
   const handleFilterChange = (key: keyof Filters, value: string) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
   };
 
   const clearFilters = () => {
-    setFilters({
-      user_id: '',
-      device_id: '',
-      environment: '',
-      search: '',
-      level: '',
-      category: '',
-      http_method: '',
-    });
+    setFilters({ user_id: '', device_id: '', environment: '', source: '', search: '', level: '', category: '', http_method: '' });
   };
 
-  const hasActiveFilters = Object.values(filters).some(v => v !== '');
+  // Single-pass to avoid iterating Object.values(filters) twice
+  const activeFilterValues = Object.values(filters).filter(v => v !== '');
+  const hasActiveFilters = activeFilterValues.length > 0;
+  const activeFilterCount = activeFilterValues.length;
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this log?')) return;
-
+    if (!confirm('Delete this log?')) return;
     try {
       await deleteLog(id);
       loadData();
@@ -851,10 +812,7 @@ export default function App() {
   };
 
   const handleDeleteArchive = async (date: string) => {
-    if (!confirm(`Are you sure you want to delete the archive for ${date}? Make sure you've downloaded it first!`)) {
-      return;
-    }
-
+    if (!confirm(`Delete archive for ${date}? Make sure you've downloaded it first.`)) return;
     try {
       await deleteArchive(date);
       loadData();
@@ -874,16 +832,55 @@ export default function App() {
     }
   };
 
+  const tableHeaders = (
+    <tr>
+      <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="timestamp" label="Time" width={columnWidths.timestamp} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="level" label="Level" width={columnWidths.level} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="category" label="Category" width={columnWidths.category} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="user" label="User" width={columnWidths.user} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="device" label="Device" width={columnWidths.device} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="env" label="Env" width={columnWidths.env} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="source" label="Source" width={columnWidths.source} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="message" label="Message" width={columnWidths.message} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="method" label="Method" width={columnWidths.method} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="endpoint" label="Endpoint" width={columnWidths.endpoint} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="status" label="Status" width={columnWidths.status} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="duration" label="Duration" width={columnWidths.duration} onResize={handleColumnResize} />
+      <ResizableHeader columnKey="actions" label="" width={columnWidths.actions} onResize={handleColumnResize} />
+    </tr>
+  );
+
+  const secondaryFiltersActive = !!(filters.user_id || filters.device_id || filters.category || filters.http_method || filters.source);
+
   return (
     <div className="container">
       <header className="header">
-        <h1>Private Logger</h1>
-        <div className="refresh-indicator">
-          <div className="dot" />
-          <span>Last updated: {lastRefresh.toLocaleTimeString()}</span>
-          <button className="btn btn-secondary" onClick={loadData}>
-            Refresh
-          </button>
+        <h1>
+          <span className="header-prefix">~/</span>private-logger
+        </h1>
+        <div className="header-right">
+          <div className="refresh-indicator">
+            <div className={`dot ${autoRefresh ? '' : 'dot-paused'}`} />
+            <span>{lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+            <label className="auto-refresh-toggle">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(ev) => setAutoRefresh(ev.target.checked)}
+              />
+              auto
+            </label>
+            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px' }} onClick={() => loadData()}>
+              refresh
+            </button>
+          </div>
+          <div className="user-menu">
+            <span className="user-name">{user?.username}</span>
+            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px' }} onClick={logout}>
+              logout
+            </button>
+          </div>
         </div>
       </header>
 
@@ -893,177 +890,147 @@ export default function App() {
       <StatsCards stats={stats} />
 
       <div className="tabs">
-        <button
-          className={`tab ${activeTab === 'logs' ? 'active' : ''}`}
-          onClick={() => setActiveTab('logs')}
-        >
-          Recent Logs ({stats?.total || 0})
+        <button className={`tab ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
+          logs ({stats?.total || 0})
         </button>
-        <button
-          className={`tab ${activeTab === 'archives' ? 'active' : ''}`}
-          onClick={() => setActiveTab('archives')}
-        >
-          Archives ({archives.length})
+        <button className={`tab ${activeTab === 'archives' ? 'active' : ''}`} onClick={() => setActiveTab('archives')}>
+          archives ({archives.length})
         </button>
       </div>
 
       {activeTab === 'logs' ? (
         <>
-          <div className="filters">
-            <input
-              type="text"
-              placeholder="Search messages, endpoints, data..."
-              value={filters.search}
-              onChange={(e) => handleFilterChange('search', e.target.value)}
-            />
-            <select
-              value={filters.level}
-              onChange={(e) => handleFilterChange('level', e.target.value)}
-            >
-              <option value="">All Levels</option>
-              <option value="debug">Debug</option>
-              <option value="info">Info</option>
-              <option value="warn">Warning</option>
-              <option value="error">Error</option>
-            </select>
-            <select
-              value={filters.category}
-              onChange={(e) => handleFilterChange('category', e.target.value)}
-            >
-              <option value="">All Categories</option>
-              {categories.map((cat) => (
-                <option key={cat} value={cat}>{cat}</option>
-              ))}
-            </select>
-            <select
-              value={filters.http_method}
-              onChange={(e) => handleFilterChange('http_method', e.target.value)}
-            >
-              <option value="">All Methods</option>
-              <option value="GET">GET</option>
-              <option value="POST">POST</option>
-              <option value="PUT">PUT</option>
-              <option value="DELETE">DELETE</option>
-              <option value="PATCH">PATCH</option>
-            </select>
-            <select
-              value={filters.user_id}
-              onChange={(e) => handleFilterChange('user_id', e.target.value)}
-            >
-              <option value="">All Users</option>
-              {users.map((user) => (
-                <option key={user} value={user}>{user}</option>
-              ))}
-            </select>
-            <select
-              value={filters.device_id}
-              onChange={(e) => handleFilterChange('device_id', e.target.value)}
-            >
-              <option value="">All Devices</option>
-              {devices.map((device) => (
-                <option key={device} value={device}>{device}</option>
-              ))}
-            </select>
-            <select
-              value={filters.environment}
-              onChange={(e) => handleFilterChange('environment', e.target.value)}
-            >
-              <option value="">All Environments</option>
-              <option value="dev">Development</option>
-              <option value="test">Test</option>
-              <option value="prod">Production</option>
-            </select>
-            {hasActiveFilters && (
-              <button className="btn btn-secondary" onClick={clearFilters}>
-                Clear Filters
+          <div className="filters-container">
+            <div className="filters-row-1">
+              <input
+                type="text"
+                placeholder="Search messages, endpoints, data..."
+                value={filters.search}
+                onChange={(ev) => handleFilterChange('search', ev.target.value)}
+              />
+              <select value={filters.level} onChange={(ev) => handleFilterChange('level', ev.target.value)}>
+                <option value="">All Levels</option>
+                <option value="debug">Debug</option>
+                <option value="info">Info</option>
+                <option value="warn">Warning</option>
+                <option value="error">Error</option>
+              </select>
+              <select value={filters.environment} onChange={(ev) => handleFilterChange('environment', ev.target.value)}>
+                <option value="">All Envs</option>
+                <option value="dev">Dev</option>
+                <option value="test">Test</option>
+                <option value="prod">Prod</option>
+              </select>
+              <button
+                className={`filters-toggle ${showMoreFilters || secondaryFiltersActive ? 'has-filters' : ''}`}
+                onClick={() => setShowMoreFilters(p => !p)}
+              >
+                {showMoreFilters ? '▲' : '▼'} more
+                {activeFilterCount > 0 && <span style={{ marginLeft: '2px' }}>({activeFilterCount})</span>}
               </button>
+              {hasActiveFilters && (
+                <button className="btn btn-secondary" style={{ padding: '7px 12px', fontSize: '12px' }} onClick={clearFilters}>
+                  clear
+                </button>
+              )}
+            </div>
+
+            {showMoreFilters && (
+              <div className="filters-row-2">
+                <select value={filters.category} onChange={(ev) => handleFilterChange('category', ev.target.value)}>
+                  <option value="">All Categories</option>
+                  {categories.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+                </select>
+                <select value={filters.http_method} onChange={(ev) => handleFilterChange('http_method', ev.target.value)}>
+                  <option value="">All Methods</option>
+                  <option value="GET">GET</option>
+                  <option value="POST">POST</option>
+                  <option value="PUT">PUT</option>
+                  <option value="DELETE">DELETE</option>
+                  <option value="PATCH">PATCH</option>
+                </select>
+                <select value={filters.user_id} onChange={(ev) => handleFilterChange('user_id', ev.target.value)}>
+                  <option value="">All Users</option>
+                  {users.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+                <select value={filters.device_id} onChange={(ev) => handleFilterChange('device_id', ev.target.value)}>
+                  <option value="">All Devices</option>
+                  {devices.map((d) => <option key={d} value={d}>{d}</option>)}
+                </select>
+                <select value={filters.source} onChange={(ev) => handleFilterChange('source', ev.target.value)}>
+                  <option value="">All Sources</option>
+                  {sources.map((src) => <option key={src} value={src}>{src}</option>)}
+                </select>
+              </div>
             )}
-            <button className="btn btn-danger" onClick={() => setShowBulkDelete(true)}>
-              Bulk Delete
-            </button>
+          </div>
+
+          <div className="table-toolbar">
+            <div className="table-toolbar-left">
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                {total.toLocaleString()} logs
+                {hasActiveFilters && <span style={{ color: 'var(--accent)' }}> · filtered</span>}
+              </span>
+            </div>
+            <div className="table-toolbar-right">
+              <button className="btn btn-danger" style={{ padding: '5px 12px', fontSize: '12px' }} onClick={() => setShowBulkDelete(true)}>
+                Bulk Delete
+              </button>
+            </div>
           </div>
 
           {loading && logs.length === 0 ? (
-            <div className="loading">Loading logs...</div>
+            <div className="logs-table logs-table-wide">
+              <table className="resizable-table" style={{ tableLayout: 'fixed' }}>
+                <thead>{tableHeaders}</thead>
+                <tbody><TableSkeletonRows count={8} /></tbody>
+              </table>
+            </div>
           ) : logs.length === 0 ? (
             <div className="empty-state">
-              <p>No logs found</p>
-              <p style={{ marginTop: '8px', fontSize: '14px' }}>
-                {hasActiveFilters
-                  ? 'Try adjusting your filters'
-                  : 'Logs will appear here once your mobile app starts sending them'}
-              </p>
+              <div className="empty-state-icon">[ ]</div>
+              <div className="empty-state-title">No logs found</div>
+              <div className="empty-state-sub">
+                {hasActiveFilters ? 'Try adjusting your filters' : 'Logs will appear here once your app starts sending them'}
+              </div>
             </div>
           ) : (
             <>
-              <div className="logs-table logs-table-wide virtual-table">
-                {/* Fixed header */}
-                <div className="virtual-table-header">
-                  <table className="resizable-table" style={{ tableLayout: 'fixed' }}>
-                    <thead>
-                      <tr>
-                        <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="timestamp" label="Timestamp" width={columnWidths.timestamp} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="level" label="Level" width={columnWidths.level} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="category" label="Category" width={columnWidths.category} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="user" label="User" width={columnWidths.user} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="device" label="Device" width={columnWidths.device} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="env" label="Env" width={columnWidths.env} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="message" label="Message" width={columnWidths.message} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="method" label="Method" width={columnWidths.method} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="endpoint" label="Endpoint" width={columnWidths.endpoint} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="status" label="Status" width={columnWidths.status} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="duration" label="Duration" width={columnWidths.duration} onResize={handleColumnResize} />
-                        <ResizableHeader columnKey="actions" label="Actions" width={columnWidths.actions} onResize={handleColumnResize} />
-                      </tr>
-                    </thead>
-                  </table>
-                </div>
-
-                {/* Virtual scrolling body */}
-                <List
-                  ref={listRef}
-                  height={600}
-                  itemCount={logs.length}
-                  itemSize={ROW_HEIGHT}
-                  width="100%"
-                  onItemsRendered={({ visibleStopIndex }: ListOnItemsRenderedProps) => {
-                    // Load more when near the end
-                    if (visibleStopIndex >= logs.length - 10 && hasMore && !loadingMore) {
-                      loadMore();
-                    }
-                  }}
-                >
-                  {({ index, style }: ListChildComponentProps) => {
-                    const log = logs[index];
-                    const isExpanded = expandedRows.has(log.id);
-                    return (
-                      <div style={style}>
-                        <VirtualLogRow
-                          log={log}
-                          onDelete={handleDelete}
-                          timezone={userTimezone}
-                          columnWidths={columnWidths}
-                          isExpanded={isExpanded}
-                          onToggleExpand={() => toggleRowExpanded(log.id)}
-                        />
-                      </div>
-                    );
-                  }}
-                </List>
-
-                {loadingMore && (
-                  <div className="loading-more">Loading more...</div>
-                )}
+              <div className="logs-table logs-table-wide">
+                <table className="resizable-table" style={{ tableLayout: 'fixed' }}>
+                  <thead>{tableHeaders}</thead>
+                  <tbody>
+                    {logs.map((log) => (
+                      <LogRow
+                        key={log.id}
+                        log={log}
+                        onDelete={handleDelete}
+                        timezone={userTimezone}
+                        columnWidths={columnWidths}
+                        isExpanded={expandedRows.has(log.id)}
+                        onToggleExpand={() => toggleRowExpanded(log.id)}
+                      />
+                    ))}
+                  </tbody>
+                </table>
               </div>
 
-              <div className="scroll-info">
-                Showing {logs.length} of {total} logs
-                {hasMore && !loadingMore && (
-                  <button className="btn btn-secondary" onClick={loadMore} style={{ marginLeft: '12px' }}>
-                    Load More
-                  </button>
-                )}
+              <div className="pagination">
+                <div className="pagination-info">
+                  {(page - 1) * perPage + 1}–{Math.min(page * perPage, total)} of {total.toLocaleString()}
+                </div>
+                <div className="pagination-controls">
+                  <select className="per-page-select" value={perPage} onChange={(ev) => setPerPage(Number(ev.target.value))}>
+                    {PAGE_SIZE_OPTIONS.map((size) => (
+                      <option key={size} value={size}>{size} / page</option>
+                    ))}
+                  </select>
+                  <button className="btn btn-secondary" disabled={page <= 1 || loading} onClick={() => setPage(1)}>«</button>
+                  <button className="btn btn-secondary" disabled={page <= 1 || loading} onClick={() => setPage(p => p - 1)}>‹</button>
+                  <span className="page-indicator">{page} / {totalPages}</span>
+                  <button className="btn btn-secondary" disabled={page >= totalPages || loading} onClick={() => setPage(p => p + 1)}>›</button>
+                  <button className="btn btn-secondary" disabled={page >= totalPages || loading} onClick={() => setPage(totalPages)}>»</button>
+                </div>
               </div>
             </>
           )}
