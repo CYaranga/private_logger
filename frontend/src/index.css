@@ -535,6 +535,12 @@ body {
   padding: 10px 12px;
   text-align: left;
   border-bottom: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+}
+
+.logs-table th:last-child,
+.logs-table td:last-child {
+  border-right: none;
 }
 
 .logs-table th {
@@ -619,13 +625,28 @@ body {
   bottom: 0;
   width: 8px;
   cursor: col-resize;
+  /* Always-visible grip line — sits on top of the column border */
   background: transparent;
-  transition: background 0.15s;
+  transition: background 0.12s;
 }
 
-.resize-handle:hover,
-.resize-handle:active {
+.resize-handle::after {
+  content: '';
+  position: absolute;
+  right: 3px;
+  top: 20%;
+  bottom: 20%;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--border-strong);
+  transition: background 0.12s, top 0.12s, bottom 0.12s;
+}
+
+.resize-handle:hover::after,
+.resize-handle:active::after {
   background: var(--accent);
+  top: 0;
+  bottom: 0;
 }
 
 .logs-table th {
