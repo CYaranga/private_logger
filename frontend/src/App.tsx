@@ -32,7 +32,7 @@ type ColumnKey = 'id' | 'timestamp' | 'level' | 'category' | 'user' | 'device' |
 
 const DEFAULT_COLUMN_WIDTHS: Record<ColumnKey, number> = {
   id: 60,
-  timestamp: 120,
+  timestamp: 165,
   level: 70,
   category: 90,
   user: 80,
@@ -149,19 +149,6 @@ function syntaxHighlightJson(json: string): JSX.Element[] {
   return elements;
 }
 
-function RelativeTimestamp({ timestamp, timezone }: { timestamp: string; timezone?: string }) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => setTick(t => t + 1), 30000);
-    return () => clearInterval(id);
-  }, []);
-  return (
-    <span className="rel-time">
-      {formatRelativeTime(timestamp)}
-      <span className="rel-time-tooltip">{formatTimestamp(timestamp, timezone)}</span>
-    </span>
-  );
-}
 
 function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
@@ -598,8 +585,11 @@ function LogRow({
     <>
       <tr className={`log-row log-level-${log.level}`} onClick={onToggleExpand}>
         <td style={{ ...cellStyle('id'), color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', fontSize: '11px' }}>#{log.id}</td>
-        <td style={cellStyle('timestamp')}>
-          <RelativeTimestamp timestamp={log.created_at} timezone={timezone} />
+        <td style={cellStyle('timestamp')} className="timestamp">
+          <span>{formatTimestamp(log.created_at, timezone)}</span>
+          <span style={{ display: 'block', fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '1px' }}>
+            {formatRelativeTime(log.created_at)}
+          </span>
         </td>
         <td style={cellStyle('level')}><LevelBadge level={log.level} /></td>
         <td style={cellStyle('category')}><CategoryBadge category={log.category} /></td>
