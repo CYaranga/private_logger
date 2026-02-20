@@ -176,6 +176,7 @@ app.use('/*', cors({
   origin: (origin) => {
     if (!origin) return null;
     if (origin === 'https://chrisyaranga.dev') return origin;
+    if (origin === 'https://logger.chrisyaranga.dev') return origin;
     if (/^http:\/\/localhost:300\d$/.test(origin)) return origin;
     if (origin === 'http://localhost:5173') return origin;
     return null;
