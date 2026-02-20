@@ -541,16 +541,16 @@ app.post('/logs/bulk-delete', async (c) => {
       user_id?: string;
       device_id?: string;
       category?: string;
+      level?: string;
+      environment?: string;
+      source?: string;
+      http_method?: string;
+      search?: string;
       start_date?: string;
       end_date?: string;
     }>();
 
-    const { user_id, device_id, category, start_date, end_date } = body;
-
-    // At least one filter must be provided
-    if (!user_id && !device_id && !category && !start_date && !end_date) {
-      return c.json({ error: 'At least one filter is required for bulk delete' }, 400);
-    }
+    const { user_id, device_id, category, level, environment, source, http_method, search, start_date, end_date } = body;
 
     // Build the WHERE clause
     let query = 'DELETE FROM logs WHERE 1=1';
@@ -569,6 +569,31 @@ app.post('/logs/bulk-delete', async (c) => {
     if (category) {
       query += ' AND category = ?';
       params.push(category);
+    }
+
+    if (level) {
+      query += ' AND level = ?';
+      params.push(level);
+    }
+
+    if (environment) {
+      query += ' AND environment = ?';
+      params.push(environment);
+    }
+
+    if (source) {
+      query += ' AND source = ?';
+      params.push(source);
+    }
+
+    if (http_method) {
+      query += ' AND http_method = ?';
+      params.push(http_method);
+    }
+
+    if (search) {
+      query += ' AND (message LIKE ? OR endpoint LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`);
     }
 
     if (start_date) {

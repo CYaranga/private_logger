@@ -88,6 +88,11 @@ export interface BulkDeleteParams {
   user_id?: string;
   device_id?: string;
   category?: string;
+  level?: string;
+  environment?: string;
+  source?: string;
+  http_method?: string;
+  search?: string;
   start_date?: string;
   end_date?: string;
 }

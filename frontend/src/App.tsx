@@ -822,6 +822,43 @@ export default function App() {
     }
   };
 
+  const handleDeleteAllFiltered = async () => {
+    const filterDesc = [
+      filters.level && `Level: ${filters.level}`,
+      filters.environment && `Env: ${filters.environment}`,
+      filters.category && `Category: ${filters.category}`,
+      filters.user_id && `User: ${filters.user_id}`,
+      filters.device_id && `Device: ${filters.device_id}`,
+      filters.source && `Source: ${filters.source}`,
+      filters.http_method && `Method: ${filters.http_method}`,
+      filters.search && `Search: "${filters.search}"`,
+    ].filter(Boolean).join(', ');
+
+    const msg = hasActiveFilters
+      ? `Delete all ${total.toLocaleString()} logs matching:\n\n${filterDesc}\n\nThis cannot be undone.`
+      : `Delete ALL ${total.toLocaleString()} logs?\n\nNo filters are active — this deletes everything.\n\nThis cannot be undone.`;
+
+    if (!confirm(msg)) return;
+
+    const params: BulkDeleteParams = {};
+    if (filters.user_id) params.user_id = filters.user_id;
+    if (filters.device_id) params.device_id = filters.device_id;
+    if (filters.category) params.category = filters.category;
+    if (filters.level) params.level = filters.level;
+    if (filters.environment) params.environment = filters.environment;
+    if (filters.source) params.source = filters.source;
+    if (filters.http_method) params.http_method = filters.http_method;
+    if (filters.search) params.search = filters.search;
+
+    try {
+      const result = await bulkDeleteLogs(params);
+      alert(result.message);
+      loadData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete logs');
+    }
+  };
+
   const tableHeaders = (
     <tr>
       <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
@@ -963,6 +1000,13 @@ export default function App() {
               </span>
             </div>
             <div className="table-toolbar-right">
+              <button
+                className="btn btn-danger"
+                style={{ padding: '5px 12px', fontSize: '12px' }}
+                onClick={handleDeleteAllFiltered}
+              >
+                {hasActiveFilters ? `Delete Filtered (${total.toLocaleString()})` : `Delete All (${total.toLocaleString()})`}
+              </button>
               <button className="btn btn-danger" style={{ padding: '5px 12px', fontSize: '12px' }} onClick={() => setShowBulkDelete(true)}>
                 Bulk Delete
               </button>
