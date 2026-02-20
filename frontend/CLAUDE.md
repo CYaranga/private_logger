@@ -8,7 +8,7 @@ Private Logger is a full-stack logging system for mobile applications. This is t
 
 - **Frontend**: React 18 + TypeScript + Vite, deployed to Cloudflare Workers
 - **Backend**: Hono on Cloudflare Workers with D1 SQLite database (in `/backend`)
-- **Live URLs**: Frontend at `chrisyaranga.dev/logger/`, API at `private-logger-api.christian-yaranga-05.workers.dev`
+- **Live URLs**: Frontend at `logger.chrisyaranga.dev`, API at `private-logger-api.christian-yaranga-05.workers.dev`
 
 ## Commands
 
@@ -42,16 +42,15 @@ React Frontend (this directory)
 - `src/types.ts` - TypeScript interfaces (Log, Stats, Filters, Archive, etc.)
 - `wrangler.toml` - Cloudflare Workers config with custom domain routing
 
-**Frontend connects to production API by default**, even in dev mode. The base path is `/logger/`.
+**Frontend connects to production API by default**, even in dev mode. The base path is `/`.
 
 ## Build Process
 
 The build script (`bun run build`) does:
 1. TypeScript compilation with `tsc -b`
-2. Vite bundling
-3. Restructures output: creates `dist/logger/`, moves assets and index.html into it
+2. Vite bundling into `dist/`
 
-This structure is required for the custom domain routing at `chrisyaranga.dev/logger/*`.
+Deployed to `logger.chrisyaranga.dev` via Cloudflare Workers with static assets.
 
 ## Database Schema
 

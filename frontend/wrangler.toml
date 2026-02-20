@@ -1,9 +1,9 @@
 name = "private-logger-frontend"
 compatibility_date = "2024-11-01"
 
-# Custom domain route
+# Custom subdomain route
 [[routes]]
-pattern = "chrisyaranga.dev/logger*"
+pattern = "logger.chrisyaranga.dev/*"
 zone_name = "chrisyaranga.dev"
 
 # Deploy as Worker with static assets
