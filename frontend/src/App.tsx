@@ -572,6 +572,8 @@ function LogRow({
   onToggleExpand: () => void;
 }) {
   const isApiCall = log.http_method !== null;
+  const senderTimezone = (log.metadata as Record<string, unknown>)?.timezone as string | undefined;
+  const senderUtcOffset = (log.metadata as Record<string, unknown>)?.utcOffset as number | undefined;
   const cellStyle = (key: ColumnKey): React.CSSProperties => ({
     width: `${columnWidths[key]}px`,
     minWidth: `${columnWidths[key]}px`,
@@ -589,6 +591,11 @@ function LogRow({
           <span>{formatTimestamp(log.created_at, timezone)}</span>
           <span style={{ display: 'block', fontSize: '10px', color: 'var(--text-tertiary)', marginTop: '1px' }}>
             {formatRelativeTime(log.created_at)}
+            {senderTimezone && (
+              <span style={{ marginLeft: '4px', color: 'var(--accent)', fontSize: '9px' }} title={`Sender: ${senderTimezone} (UTC${senderUtcOffset !== undefined ? (senderUtcOffset <= 0 ? '+' : '-') + Math.abs(senderUtcOffset / 60) : ''})`}>
+                {senderTimezone.split('/').pop()?.replace(/_/g, ' ')}
+              </span>
+            )}
           </span>
         </td>
         <td style={cellStyle('level')}><LevelBadge level={log.level} /></td>
@@ -620,6 +627,12 @@ function LogRow({
                 <h4>Full Message</h4>
                 <pre className="full-message-content">{log.message}</pre>
               </div>
+              {senderTimezone && (
+                <div className="log-detail-section">
+                  <h4>Sender Timezone</h4>
+                  <code className="full-endpoint">{senderTimezone} (UTC{senderUtcOffset !== undefined ? (senderUtcOffset <= 0 ? '+' : '-') + Math.abs(senderUtcOffset / 60) : ''})</code>
+                </div>
+              )}
               {isApiCall && log.endpoint && (
                 <div className="log-detail-section">
                   <h4>Full Endpoint</h4>
