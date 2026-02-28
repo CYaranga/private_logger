@@ -1548,3 +1548,517 @@ body {
   max-height: 200px;
   overflow-y: auto;
 }
+
+/* ════════════════════════════════════════════════ */
+/* ─── MOBILE LAYOUT (<= 768px) ──────────────── */
+/* ════════════════════════════════════════════════ */
+
+/* ─── Mobile Header ──────────────────────────── */
+.mobile .mobile-header {
+  margin-bottom: var(--space-4);
+  padding-bottom: var(--space-3);
+  border-bottom: 1px solid var(--border);
+}
+
+.mobile-header-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.mobile-header-top h1 {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+.mobile-header-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+.mobile-auto-refresh {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+
+/* ─── Mobile Stats Bar ───────────────────────── */
+.mobile-stats {
+  margin-bottom: var(--space-4);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.mobile-stats-summary {
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-stats-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+}
+
+.mobile-stat-item {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mobile-stat-label {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mobile-stat-value {
+  font-family: var(--font-mono);
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+}
+
+.mobile-stat-error {
+  color: var(--error);
+}
+
+.mobile-stats-chevron {
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+.mobile-storage-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+
+.mobile-storage-track {
+  flex: 1;
+  height: 3px;
+  background: var(--bg-2);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.mobile-storage-pct {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text-tertiary);
+  min-width: 28px;
+  text-align: right;
+}
+
+.mobile-stats-expanded {
+  padding: var(--space-3) var(--space-4);
+  border-top: 1px solid var(--border);
+}
+
+.mobile-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.mobile-stat-card {
+  background: var(--bg-2);
+  border-radius: 6px;
+  padding: var(--space-3);
+}
+
+.mobile-stat-card .stat-label {
+  font-size: 9px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: 2px;
+}
+
+.mobile-stat-card .stat-value {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+}
+
+.mobile-stat-card-error {
+  border: 1px solid rgba(239, 68, 68, 0.25);
+  background: rgba(239, 68, 68, 0.04);
+}
+
+/* ─── Mobile Search + Filter Button ──────────── */
+.mobile-search-row {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.mobile-search-row input {
+  flex: 1;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-family: var(--font-ui);
+  min-width: 0;
+}
+
+.mobile-search-row input:focus {
+  outline: none;
+  border-color: var(--border-focus);
+}
+
+.mobile-search-row input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.mobile-filter-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 14px;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-filter-btn.has-filters {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.mobile-filter-count {
+  background: var(--accent);
+  color: white;
+  font-size: 10px;
+  font-weight: 600;
+  min-width: 18px;
+  height: 18px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 2px;
+}
+
+/* ─── Mobile Toolbar ─────────────────────────── */
+.mobile-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: var(--space-3);
+}
+
+/* ─── Mobile Log Cards ───────────────────────── */
+.mobile-log-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mobile-log-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  border-left: 3px solid var(--text-tertiary);
+  overflow: hidden;
+}
+
+.mobile-log-level-error { border-left-color: var(--error); }
+.mobile-log-level-warn { border-left-color: var(--warning); }
+.mobile-log-level-info { border-left-color: var(--accent); }
+.mobile-log-level-debug { border-left-color: var(--text-tertiary); }
+
+.mobile-log-level-error .mobile-log-card-main {
+  background: rgba(239, 68, 68, 0.03);
+}
+.mobile-log-level-warn .mobile-log-card-main {
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.mobile-log-card-main {
+  padding: var(--space-3) var(--space-4);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.mobile-log-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin-bottom: var(--space-2);
+}
+
+.mobile-log-api {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  overflow: hidden;
+}
+
+.mobile-log-endpoint {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--cyan);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.mobile-log-message {
+  font-size: 13px;
+  color: var(--text-primary);
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  margin-bottom: var(--space-2);
+  word-break: break-word;
+}
+
+.mobile-log-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.mobile-log-time {
+  color: var(--text-tertiary);
+}
+
+.mobile-log-user {
+  color: var(--accent);
+}
+
+.mobile-log-duration {
+  color: var(--text-tertiary);
+  margin-left: auto;
+}
+
+/* ─── Mobile Log Details (expanded) ──────────── */
+.mobile-log-details {
+  padding: var(--space-4);
+  border-top: 1px solid var(--border);
+  background: var(--bg-0);
+}
+
+.mobile-log-detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: var(--space-2) 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+}
+
+.mobile-log-detail-label {
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.mobile-log-detail-value {
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  text-align: right;
+  word-break: break-all;
+  max-width: 65%;
+}
+
+.mobile-log-details .log-detail-section {
+  margin-top: var(--space-4);
+}
+
+.mobile-log-delete {
+  width: 100%;
+  margin-top: var(--space-4);
+  min-height: 40px;
+}
+
+/* ─── Mobile Skeleton ────────────────────────── */
+.mobile-skeleton-card {
+  pointer-events: none;
+}
+
+.mobile-skeleton-card .mobile-log-badges {
+  gap: var(--space-2);
+}
+
+/* ─── Mobile Archive Cards ───────────────────── */
+.mobile-archives {
+  margin-top: var(--space-2);
+}
+
+.mobile-archives-header {
+  display: flex;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.mobile-archive-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.mobile-archive-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: var(--space-4);
+}
+
+.mobile-archive-date {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: var(--space-2);
+}
+
+.mobile-archive-info {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-secondary);
+  margin-bottom: var(--space-3);
+}
+
+.mobile-archive-time {
+  color: var(--text-tertiary);
+}
+
+.mobile-archive-actions {
+  display: flex;
+  gap: var(--space-2);
+}
+
+/* ─── Mobile Pagination ──────────────────────── */
+.mobile-pagination {
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+}
+
+.mobile-pagination .pagination-controls {
+  gap: var(--space-1);
+}
+
+.mobile-pagination .pagination-controls .btn {
+  min-width: 36px;
+  min-height: 36px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ─── Filter Bottom Sheet ────────────────────── */
+.filter-sheet-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+  display: flex;
+  align-items: flex-end;
+  backdrop-filter: blur(2px);
+}
+
+.filter-sheet {
+  background: var(--bg-1);
+  border-radius: 16px 16px 0 0;
+  width: 100%;
+  max-height: 85vh;
+  overflow-y: auto;
+  animation: slide-up 0.25s ease-out;
+}
+
+@keyframes slide-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+.filter-sheet-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  background: var(--bg-1);
+  z-index: 1;
+}
+
+.filter-sheet-header h3 {
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.filter-sheet-body {
+  padding: var(--space-4) var(--space-5);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.filter-sheet-body .filter-group select {
+  min-height: 44px;
+}
+
+.filter-sheet-footer {
+  display: flex;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border);
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-1);
+}
+
+.filter-sheet-footer .btn {
+  min-height: 44px;
+}
+
+/* ─── Hide desktop elements in mobile ────────── */
+.mobile .stats-primary-row,
+.mobile .stats-secondary-row,
+.mobile .storage-bar:not(.mobile-stats-expanded .storage-bar) {
+  display: none;
+}

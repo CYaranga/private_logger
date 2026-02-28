@@ -67,8 +67,17 @@ function getStoredColumnWidths(): Record<ColumnKey, number> {
   return DEFAULT_COLUMN_WIDTHS;
 }
 
+// SQLite CURRENT_TIMESTAMP stores UTC without 'Z', so we must add it explicitly
+// to prevent JS from misinterpreting the value as local time.
+function parseUtcTimestamp(timestamp: string): Date {
+  const normalized = timestamp.includes('Z') || timestamp.includes('+')
+    ? timestamp
+    : timestamp.replace(' ', 'T') + 'Z';
+  return new Date(normalized);
+}
+
 function formatTimestamp(timestamp: string, timezone?: string): string {
-  const date = new Date(timestamp);
+  const date = parseUtcTimestamp(timestamp);
   return date.toLocaleString(undefined, {
     month: 'short',
     day: '2-digit',
@@ -83,7 +92,7 @@ function formatTimestamp(timestamp: string, timezone?: string): string {
 
 function formatRelativeTime(timestamp: string): string {
   const now = Date.now();
-  const then = new Date(timestamp).getTime();
+  const then = parseUtcTimestamp(timestamp).getTime();
   const diff = now - then;
   const s = Math.floor(diff / 1000);
   if (s < 60) return `${s}s ago`;
@@ -108,6 +117,20 @@ function formatDuration(ms: number | null): string {
   if (ms === null) return '—';
   if (ms < 1000) return `${ms.toFixed(0)}ms`;
   return `${(ms / 1000).toFixed(2)}s`;
+}
+
+function useIsMobile(breakpoint = 768) {
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth <= breakpoint
+  );
+  useEffect(() => {
+    const mql = window.matchMedia(`(max-width: ${breakpoint}px)`);
+    const handler = (e: MediaQueryListEvent) => setIsMobile(e.matches);
+    mql.addEventListener('change', handler);
+    setIsMobile(mql.matches);
+    return () => mql.removeEventListener('change', handler);
+  }, [breakpoint]);
+  return isMobile;
 }
 
 function syntaxHighlightJson(json: string): JSX.Element[] {
@@ -665,6 +688,336 @@ function LogRow({
   );
 }
 
+/* ─── Mobile Components ──────────────────────── */
+
+function MobileStatsBar({ stats, storage, expanded, onToggle }: {
+  stats: Stats | null;
+  storage: Storage | null;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  if (!stats) return null;
+  const hasErrors = (stats.errorCount || 0) > 0;
+  const levelCounts = stats.byLevel?.reduce(
+    (acc, item) => ({ ...acc, [item.level]: item.count }),
+    { debug: 0, info: 0, warn: 0, error: 0 }
+  ) || { debug: 0, info: 0, warn: 0, error: 0 };
+  const totalAllLogs = stats.total + (stats.archives?.totalLogs || 0);
+
+  return (
+    <div className="mobile-stats">
+      <div className="mobile-stats-summary" onClick={onToggle}>
+        <div className="mobile-stats-row">
+          <span className="mobile-stat-item">
+            <span className="mobile-stat-label">Recent</span>
+            <span className="mobile-stat-value">{stats.total.toLocaleString()}</span>
+          </span>
+          <span className="mobile-stat-item">
+            <span className="mobile-stat-label">Errors</span>
+            <span className={`mobile-stat-value ${hasErrors ? 'mobile-stat-error' : ''}`}>
+              {(stats.errorCount || 0).toLocaleString()}
+            </span>
+          </span>
+          <span className="mobile-stat-item">
+            <span className="mobile-stat-label">24h</span>
+            <span className="mobile-stat-value">{stats.last24Hours.toLocaleString()}</span>
+          </span>
+          <span className="mobile-stats-chevron">{expanded ? '▲' : '▼'}</span>
+        </div>
+        {storage && (
+          <div className="mobile-storage-row">
+            <div className="mobile-storage-track">
+              <div
+                className="storage-fill"
+                style={{
+                  width: `${Math.min(storage.usage_percent, 100)}%`,
+                  backgroundColor: storage.warning ? 'var(--error)' : storage.usage_percent > 50 ? 'var(--warning)' : 'var(--success)',
+                }}
+              />
+            </div>
+            <span className="mobile-storage-pct">{storage.usage_percent.toFixed(0)}%</span>
+          </div>
+        )}
+      </div>
+      {expanded && (
+        <div className="mobile-stats-expanded">
+          <div className="mobile-stats-grid">
+            <div className="mobile-stat-card">
+              <div className="stat-label">Recent</div>
+              <div className="stat-value">{stats.total.toLocaleString()}</div>
+            </div>
+            <div className="mobile-stat-card">
+              <div className="stat-label">Last 24h</div>
+              <div className="stat-value">{stats.last24Hours.toLocaleString()}</div>
+            </div>
+            <div className="mobile-stat-card">
+              <div className="stat-label">API Calls</div>
+              <div className="stat-value">{(stats.apiCalls || 0).toLocaleString()}</div>
+            </div>
+            <div className={`mobile-stat-card ${hasErrors ? 'mobile-stat-card-error' : ''}`}>
+              <div className="stat-label">Errors</div>
+              <div className="stat-value" style={{ color: 'var(--error)' }}>{(stats.errorCount || 0).toLocaleString()}</div>
+            </div>
+            <div className="mobile-stat-card">
+              <div className="stat-label">Total</div>
+              <div className="stat-value">{totalAllLogs.toLocaleString()}</div>
+            </div>
+            <div className="mobile-stat-card">
+              <div className="stat-label">Archived</div>
+              <div className="stat-value">{(stats.archives?.totalLogs || 0).toLocaleString()}</div>
+            </div>
+            <div className="mobile-stat-card">
+              <div className="stat-label">By Level</div>
+              <div style={{ fontSize: '11px', fontFamily: 'var(--font-mono)', marginTop: '4px', lineHeight: '1.8' }}>
+                <span style={{ color: 'var(--text-secondary)' }}>dbg {levelCounts.debug}</span>
+                {' · '}
+                <span style={{ color: 'var(--accent)' }}>inf {levelCounts.info}</span>
+                {' · '}
+                <span style={{ color: 'var(--warning)' }}>wrn {levelCounts.warn}</span>
+                {' · '}
+                <span style={{ color: 'var(--error)' }}>err {levelCounts.error}</span>
+              </div>
+            </div>
+            <div className="mobile-stat-card">
+              <div className="stat-label">Users</div>
+              <div className="stat-value">{stats.uniqueUsers.toLocaleString()}</div>
+            </div>
+          </div>
+          {storage && <StorageBar storage={storage} />}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MobileFilterSheet({
+  filters, onFilterChange, onClear, onClose,
+  users, devices, sources, categories,
+}: {
+  filters: Filters;
+  onFilterChange: (key: keyof Filters, value: string) => void;
+  onClear: () => void;
+  onClose: () => void;
+  users: string[];
+  devices: string[];
+  sources: string[];
+  categories: string[];
+}) {
+  return (
+    <div className="filter-sheet-overlay" onClick={onClose}>
+      <div className="filter-sheet" onClick={(e) => e.stopPropagation()}>
+        <div className="filter-sheet-header">
+          <h3>Filters</h3>
+          <button className="btn btn-secondary" style={{ padding: '6px 16px', fontSize: '12px' }} onClick={onClose}>Done</button>
+        </div>
+        <div className="filter-sheet-body">
+          <div className="filter-group">
+            <label>Level</label>
+            <select value={filters.level} onChange={(e) => onFilterChange('level', e.target.value)}>
+              <option value="">All Levels</option>
+              <option value="debug">Debug</option>
+              <option value="info">Info</option>
+              <option value="warn">Warning</option>
+              <option value="error">Error</option>
+            </select>
+          </div>
+          <div className="filter-group">
+            <label>Environment</label>
+            <select value={filters.environment} onChange={(e) => onFilterChange('environment', e.target.value)}>
+              <option value="">All Envs</option>
+              <option value="dev">Dev</option>
+              <option value="test">Test</option>
+              <option value="prod">Prod</option>
+            </select>
+          </div>
+          <div className="filter-group">
+            <label>Source</label>
+            <select value={filters.source} onChange={(e) => onFilterChange('source', e.target.value)}>
+              <option value="">All Sources</option>
+              {sources.map((src) => <option key={src} value={src}>{src}</option>)}
+            </select>
+          </div>
+          <div className="filter-group">
+            <label>Category</label>
+            <select value={filters.category} onChange={(e) => onFilterChange('category', e.target.value)}>
+              <option value="">All Categories</option>
+              {categories.map((cat) => <option key={cat} value={cat}>{cat}</option>)}
+            </select>
+          </div>
+          <div className="filter-group">
+            <label>HTTP Method</label>
+            <select value={filters.http_method} onChange={(e) => onFilterChange('http_method', e.target.value)}>
+              <option value="">All Methods</option>
+              <option value="GET">GET</option>
+              <option value="POST">POST</option>
+              <option value="PUT">PUT</option>
+              <option value="DELETE">DELETE</option>
+              <option value="PATCH">PATCH</option>
+            </select>
+          </div>
+          <div className="filter-group">
+            <label>User</label>
+            <select value={filters.user_id} onChange={(e) => onFilterChange('user_id', e.target.value)}>
+              <option value="">All Users</option>
+              {users.map((u) => <option key={u} value={u}>{u}</option>)}
+            </select>
+          </div>
+          <div className="filter-group">
+            <label>Device</label>
+            <select value={filters.device_id} onChange={(e) => onFilterChange('device_id', e.target.value)}>
+              <option value="">All Devices</option>
+              {devices.map((d) => <option key={d} value={d}>{d}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="filter-sheet-footer">
+          <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => { onClear(); onClose(); }}>Clear All</button>
+          <button className="btn" style={{ flex: 1 }} onClick={onClose}>Apply</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function MobileLogCard({
+  log, onDelete, timezone, isExpanded, onToggleExpand,
+}: {
+  log: Log;
+  onDelete: (id: number) => void;
+  timezone?: string;
+  isExpanded: boolean;
+  onToggleExpand: () => void;
+}) {
+  const isApiCall = log.http_method !== null;
+  const senderTimezone = (log.metadata as Record<string, unknown>)?.timezone as string | undefined;
+
+  return (
+    <div className={`mobile-log-card mobile-log-level-${log.level}`}>
+      <div className="mobile-log-card-main" onClick={onToggleExpand}>
+        <div className="mobile-log-badges">
+          <LevelBadge level={log.level} />
+          <SourceBadge source={log.source} />
+          <EnvironmentBadge env={log.environment} />
+          {log.category && <CategoryBadge category={log.category} />}
+        </div>
+        {isApiCall && (
+          <div className="mobile-log-api">
+            <HttpMethodBadge method={log.http_method} />
+            <span className="mobile-log-endpoint">{log.endpoint || ''}</span>
+            {log.status_code !== null && <StatusCodeBadge code={log.status_code} />}
+          </div>
+        )}
+        <div className="mobile-log-message">{log.message}</div>
+        <div className="mobile-log-meta">
+          <span className="mobile-log-time">{formatRelativeTime(log.created_at)}</span>
+          {log.user_id && <span className="mobile-log-user">{log.user_id}</span>}
+          {log.duration_ms !== null && (
+            <span className="mobile-log-duration">{formatDuration(log.duration_ms)}</span>
+          )}
+        </div>
+      </div>
+      {isExpanded && (
+        <div className="mobile-log-details" onClick={(e) => e.stopPropagation()}>
+          <div className="mobile-log-detail-row">
+            <span className="mobile-log-detail-label">ID</span>
+            <span className="mobile-log-detail-value">#{log.id}</span>
+          </div>
+          <div className="mobile-log-detail-row">
+            <span className="mobile-log-detail-label">Time</span>
+            <span className="mobile-log-detail-value">{formatTimestamp(log.created_at, timezone)}</span>
+          </div>
+          {log.device_id && (
+            <div className="mobile-log-detail-row">
+              <span className="mobile-log-detail-label">Device</span>
+              <span className="mobile-log-detail-value">{log.device_id}</span>
+            </div>
+          )}
+          {senderTimezone && (
+            <div className="mobile-log-detail-row">
+              <span className="mobile-log-detail-label">Sender TZ</span>
+              <span className="mobile-log-detail-value">{senderTimezone}</span>
+            </div>
+          )}
+          <div className="log-detail-section log-detail-message">
+            <h4>Full Message</h4>
+            <pre className="full-message-content">{log.message}</pre>
+          </div>
+          <div className="log-detail-section">
+            <h4>Metadata</h4>
+            <JsonViewer data={log.metadata} label="Metadata" />
+          </div>
+          {isApiCall && (
+            <>
+              {log.endpoint && (
+                <div className="log-detail-section">
+                  <h4>Full Endpoint</h4>
+                  <code className="full-endpoint">{log.endpoint}</code>
+                </div>
+              )}
+              <div className="log-detail-section">
+                <h4>Request Data</h4>
+                <JsonViewer data={log.request_data} label="Request" />
+              </div>
+              <div className="log-detail-section">
+                <h4>Response Data</h4>
+                <JsonViewer data={log.response_data} label="Response" />
+              </div>
+            </>
+          )}
+          <button
+            className="btn btn-danger mobile-log-delete"
+            onClick={() => { if (confirm('Delete this log?')) onDelete(log.id); }}
+          >
+            Delete Log
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MobileArchiveCard({ archive, onDelete, timezone }: {
+  archive: Archive;
+  onDelete: (date: string) => void;
+  timezone?: string;
+}) {
+  return (
+    <div className="mobile-archive-card">
+      <div className="mobile-archive-date">{archive.archive_date}</div>
+      <div className="mobile-archive-info">
+        <span>{archive.log_count.toLocaleString()} logs</span>
+        <span className="mobile-archive-time">{formatTimestamp(archive.created_at, timezone)}</span>
+      </div>
+      <div className="mobile-archive-actions">
+        <a href={getArchiveDownloadUrl(archive.archive_date)} className="btn btn-secondary" style={{ flex: 1, textAlign: 'center', textDecoration: 'none', fontSize: '12px' }} download>
+          Download
+        </a>
+        <button className="btn btn-danger" style={{ flex: 1, fontSize: '12px' }} onClick={() => onDelete(archive.archive_date)}>
+          Delete
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function MobileSkeletonCards({ count = 5 }: { count?: number }) {
+  return (
+    <div className="mobile-log-list">
+      {Array.from({ length: count }).map((_, i) => (
+        <div key={i} className="mobile-log-card mobile-skeleton-card">
+          <div className="mobile-log-badges">
+            <div className="skeleton-cell" style={{ width: '50px', height: '18px' }} />
+            <div className="skeleton-cell" style={{ width: '40px', height: '18px' }} />
+            <div className="skeleton-cell" style={{ width: '35px', height: '18px' }} />
+          </div>
+          <div className="skeleton-cell" style={{ width: '80%', height: '14px', marginTop: '8px' }} />
+          <div className="skeleton-cell" style={{ width: '55%', height: '12px', marginTop: '6px' }} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function App() {
   const { user, logout } = useAuth();
   const [activeTab, setActiveTab] = useState<'logs' | 'archives'>('logs');
@@ -698,6 +1051,9 @@ export default function App() {
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [showBulkDelete, setShowBulkDelete] = useState(false);
   const [showMoreFilters, setShowMoreFilters] = useState(false);
+  const isMobile = useIsMobile();
+  const [showFilterSheet, setShowFilterSheet] = useState(false);
+  const [mobileStatsExpanded, setMobileStatsExpanded] = useState(false);
 
   const handleColumnResize = useCallback((key: ColumnKey, width: number) => {
     setColumnWidths(prev => {
@@ -872,6 +1228,188 @@ export default function App() {
     }
   };
 
+  /* ─── Mobile Layout ──────────────────────────── */
+  if (isMobile) {
+    return (
+      <div className="container mobile">
+        <header className="mobile-header">
+          <div className="mobile-header-top">
+            <h1><span className="header-prefix">~/</span>private-logger</h1>
+            <div className="mobile-header-actions">
+              <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px' }} onClick={() => loadData()}>
+                refresh
+              </button>
+              <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px' }} onClick={logout}>
+                logout
+              </button>
+            </div>
+          </div>
+          <div className="mobile-auto-refresh">
+            <div className={`dot ${autoRefresh ? '' : 'dot-paused'}`} />
+            <span>{lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+            <label className="auto-refresh-toggle">
+              <input type="checkbox" checked={autoRefresh} onChange={(ev) => setAutoRefresh(ev.target.checked)} />
+              auto
+            </label>
+          </div>
+        </header>
+
+        {error && <div className="error">{error}</div>}
+
+        <MobileStatsBar
+          stats={stats}
+          storage={storage}
+          expanded={mobileStatsExpanded}
+          onToggle={() => setMobileStatsExpanded(p => !p)}
+        />
+
+        <div className="tabs">
+          <button className={`tab ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
+            logs ({stats?.total || 0})
+          </button>
+          <button className={`tab ${activeTab === 'archives' ? 'active' : ''}`} onClick={() => setActiveTab('archives')}>
+            archives ({archives.length})
+          </button>
+        </div>
+
+        {activeTab === 'logs' ? (
+          <>
+            <div className="mobile-search-row">
+              <input
+                type="text"
+                placeholder="Search logs..."
+                value={filters.search}
+                onChange={(ev) => handleFilterChange('search', ev.target.value)}
+              />
+              <button
+                className={`mobile-filter-btn ${activeFilterCount > 0 ? 'has-filters' : ''}`}
+                onClick={() => setShowFilterSheet(true)}
+              >
+                Filters{activeFilterCount > 0 && <span className="mobile-filter-count">{activeFilterCount}</span>}
+              </button>
+            </div>
+
+            <div className="mobile-toolbar">
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)' }}>
+                {total.toLocaleString()} logs
+                {hasActiveFilters && <span style={{ color: 'var(--accent)' }}> · filtered</span>}
+              </span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  className="btn btn-danger"
+                  style={{ padding: '5px 10px', fontSize: '11px' }}
+                  onClick={handleDeleteAllFiltered}
+                >
+                  {hasActiveFilters ? `Del (${total})` : `Del All`}
+                </button>
+                <button className="btn btn-danger" style={{ padding: '5px 10px', fontSize: '11px' }} onClick={() => setShowBulkDelete(true)}>
+                  Bulk
+                </button>
+              </div>
+            </div>
+
+            {loading && logs.length === 0 ? (
+              <MobileSkeletonCards count={6} />
+            ) : logs.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">[ ]</div>
+                <div className="empty-state-title">No logs found</div>
+                <div className="empty-state-sub">
+                  {hasActiveFilters ? 'Try adjusting your filters' : 'Logs will appear here once your app starts sending them'}
+                </div>
+              </div>
+            ) : (
+              <>
+                <div className="mobile-log-list">
+                  {logs.map((log) => (
+                    <MobileLogCard
+                      key={log.id}
+                      log={log}
+                      onDelete={handleDelete}
+                      timezone={userTimezone}
+                      isExpanded={expandedRows.has(log.id)}
+                      onToggleExpand={() => toggleRowExpanded(log.id)}
+                    />
+                  ))}
+                </div>
+
+                <div className="pagination mobile-pagination">
+                  <div className="pagination-info">
+                    {(page - 1) * perPage + 1}–{Math.min(page * perPage, total)} of {total.toLocaleString()}
+                  </div>
+                  <div className="pagination-controls">
+                    <select className="per-page-select" value={perPage} onChange={(ev) => setPerPage(Number(ev.target.value))}>
+                      {PAGE_SIZE_OPTIONS.map((size) => (
+                        <option key={size} value={size}>{size}</option>
+                      ))}
+                    </select>
+                    <button className="btn btn-secondary" disabled={page <= 1 || loading} onClick={() => setPage(p => p - 1)}>‹</button>
+                    <span className="page-indicator">{page}/{totalPages}</span>
+                    <button className="btn btn-secondary" disabled={page >= totalPages || loading} onClick={() => setPage(p => p + 1)}>›</button>
+                  </div>
+                </div>
+              </>
+            )}
+
+            {showFilterSheet && (
+              <MobileFilterSheet
+                filters={filters}
+                onFilterChange={handleFilterChange}
+                onClear={clearFilters}
+                onClose={() => setShowFilterSheet(false)}
+                users={users}
+                devices={devices}
+                sources={sources}
+                categories={categories}
+              />
+            )}
+          </>
+        ) : (
+          <div className="mobile-archives">
+            <div className="mobile-archives-header">
+              <button className="btn btn-secondary" style={{ flex: 1, fontSize: '12px' }} onClick={handleRunArchive}>Archive Now</button>
+              {archives.length > 0 && (
+                <a href={getExportAllUrl()} className="btn btn-secondary" style={{ flex: 1, textAlign: 'center', textDecoration: 'none', fontSize: '12px' }} download>Export All</a>
+              )}
+            </div>
+            <p className="archives-info">
+              Logs older than 7 days are automatically archived daily at 3:00 AM UTC.
+            </p>
+            {archives.length === 0 ? (
+              <div className="empty-state">
+                <div className="empty-state-icon">[ ]</div>
+                <div className="empty-state-title">No archives yet</div>
+                <div className="empty-state-sub">Archives appear here after logs are older than 7 days</div>
+              </div>
+            ) : (
+              <div className="mobile-archive-list">
+                {archives.map((archive) => (
+                  <MobileArchiveCard
+                    key={archive.id}
+                    archive={archive}
+                    onDelete={handleDeleteArchive}
+                    timezone={userTimezone}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {showBulkDelete && (
+          <BulkDeleteModal
+            users={users}
+            devices={devices}
+            categories={categories}
+            onClose={() => setShowBulkDelete(false)}
+            onDelete={handleBulkDelete}
+          />
+        )}
+      </div>
+    );
+  }
+
+  /* ─── Desktop Layout ─────────────────────────── */
   const tableHeaders = (
     <tr>
       <ResizableHeader columnKey="id" label="ID" width={columnWidths.id} onResize={handleColumnResize} />
