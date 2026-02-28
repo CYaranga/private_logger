@@ -1550,6 +1550,108 @@ body {
 }
 
 /* ════════════════════════════════════════════════ */
+/* ─── ANALYTICS DASHBOARD ──────────────────── */
+/* ════════════════════════════════════════════════ */
+
+.analytics-dashboard {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.analytics-range-selector {
+  display: flex;
+  gap: 4px;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px;
+  width: fit-content;
+}
+
+.range-btn {
+  padding: 6px 16px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.range-btn:hover {
+  color: var(--text-primary);
+  background: var(--bg-2);
+}
+
+.range-btn.active {
+  background: var(--accent-muted);
+  color: var(--accent);
+}
+
+.analytics-card {
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 16px;
+}
+
+.analytics-card h3 {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.analytics-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+.analytics-row-mobile {
+  grid-template-columns: 1fr;
+}
+
+.analytics-loading,
+.analytics-empty {
+  text-align: center;
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 60px 20px;
+}
+
+.analytics-empty-chart {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.analytics-card .recharts-cartesian-grid-horizontal line,
+.analytics-card .recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.04);
+}
+
+.analytics-card .recharts-legend-item-text {
+  color: var(--text-secondary) !important;
+  font-family: var(--font-mono) !important;
+  font-size: 11px !important;
+}
+
+.analytics-card .recharts-default-tooltip {
+  font-family: var(--font-mono) !important;
+}
+
+/* ════════════════════════════════════════════════ */
 /* ─── MOBILE LAYOUT (<= 768px) ──────────────── */
 /* ════════════════════════════════════════════════ */
 

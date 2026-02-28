@@ -1,6 +1,6 @@
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'HEAD';
-export type LogSource = 'ios' | 'android' | 'web' | 'desktop' | 'backend' | 'simulator' | 'cli' | 'api' | 'watch' | 'tv' | 'extension' | 'iot';
+export type LogSource = 'ios' | 'android' | 'web' | 'desktop' | 'backend' | 'simulator' | 'cli' | 'api' | 'watch' | 'tv' | 'extension' | 'iot' | 'rebeca-web-desktop' | 'rebeca-web-mobile';
 
 export interface Log {
   id: number;
@@ -71,4 +71,24 @@ export interface Filters {
   level: string;
   category: string;
   http_method: string;
+}
+
+export type TimeRange = '1h' | '6h' | '24h' | '7d';
+
+export interface TimeseriesBucket {
+  timestamp: string;
+  total: number;
+  by_level: { debug: number; info: number; warn: number; error: number };
+  error_rate: number;
+  avg_duration_ms: number | null;
+  p50_duration_ms: number | null;
+  p95_duration_ms: number | null;
+  p99_duration_ms: number | null;
+}
+
+export interface TimeseriesResponse {
+  buckets: TimeseriesBucket[];
+  top_error_categories: { category: string; count: number }[];
+  status_code_distribution: { group: string; count: number }[];
+  range: TimeRange;
 }

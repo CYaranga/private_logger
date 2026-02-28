@@ -18,6 +18,12 @@ import {
   type BulkDeleteParams,
 } from './api';
 import { useAuth } from './AuthContext';
+import { fetchTimeseries } from './api';
+import type { TimeRange, TimeseriesResponse } from './types';
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, Legend,
+} from 'recharts';
 
 const PAGE_SIZE_OPTIONS = [25, 50, 200] as const;
 
@@ -1018,9 +1024,228 @@ function MobileSkeletonCards({ count = 5 }: { count?: number }) {
   );
 }
 
+const CHART_COLORS = {
+  debug: '#6b7280',
+  info: '#3b82f6',
+  warn: '#f59e0b',
+  error: '#ef4444',
+};
+
+const STATUS_COLORS: Record<string, string> = {
+  '2xx': '#22c55e',
+  '3xx': '#3b82f6',
+  '4xx': '#f59e0b',
+  '5xx': '#ef4444',
+  'other': '#6b7280',
+};
+
+function AnalyticsDashboard({ isMobile }: { isMobile: boolean }) {
+  const [range, setRange] = useState<TimeRange>('24h');
+  const [data, setData] = useState<TimeseriesResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    fetchTimeseries(range).then(res => {
+      if (!cancelled) {
+        setData(res);
+        setLoading(false);
+      }
+    }).catch(() => {
+      if (!cancelled) setLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [range]);
+
+  const formatXAxis = (ts: string) => {
+    const d = new Date(ts);
+    if (range === '7d') return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  };
+
+  const formatLabel = (label: unknown) => formatXAxis(String(label));
+
+  const chartHeight = isMobile ? 250 : 300;
+
+  const rangeSelector = (
+    <div className="analytics-range-selector">
+      {(['1h', '6h', '24h', '7d'] as TimeRange[]).map(r => (
+        <button key={r} className={`range-btn ${range === r ? 'active' : ''}`} onClick={() => setRange(r)}>{r}</button>
+      ))}
+    </div>
+  );
+
+  if (loading) {
+    return (
+      <div className="analytics-dashboard">
+        {rangeSelector}
+        <div className="analytics-loading">Loading analytics...</div>
+      </div>
+    );
+  }
+
+  if (!data || data.buckets.length === 0) {
+    return (
+      <div className="analytics-dashboard">
+        {rangeSelector}
+        <div className="analytics-empty">No data available for this time range.</div>
+      </div>
+    );
+  }
+
+  const volumeData = data.buckets.map(b => ({
+    time: b.timestamp,
+    debug: b.by_level.debug,
+    info: b.by_level.info,
+    warn: b.by_level.warn,
+    error: b.by_level.error,
+  }));
+
+  const errorRateData = data.buckets.map(b => ({
+    time: b.timestamp,
+    rate: b.error_rate,
+  }));
+
+  const perfData = data.buckets
+    .filter(b => b.p50_duration_ms !== null)
+    .map(b => ({
+      time: b.timestamp,
+      p50: b.p50_duration_ms,
+      p95: b.p95_duration_ms,
+      p99: b.p99_duration_ms,
+    }));
+
+  const statusData = data.status_code_distribution.map(s => ({
+    name: s.group,
+    value: s.count,
+  }));
+
+  return (
+    <div className="analytics-dashboard">
+      {rangeSelector}
+
+      <div className="analytics-card">
+        <h3>Log Volume</h3>
+        <ResponsiveContainer width="100%" height={chartHeight}>
+          <AreaChart data={volumeData}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis dataKey="time" tickFormatter={formatXAxis} stroke="#6b7280" fontSize={11} />
+            <YAxis stroke="#6b7280" fontSize={11} />
+            <Tooltip
+              contentStyle={{ background: '#161616', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}
+              labelFormatter={formatLabel}
+            />
+            <Area type="monotone" dataKey="error" stackId="1" fill={CHART_COLORS.error} stroke={CHART_COLORS.error} fillOpacity={0.7} />
+            <Area type="monotone" dataKey="warn" stackId="1" fill={CHART_COLORS.warn} stroke={CHART_COLORS.warn} fillOpacity={0.7} />
+            <Area type="monotone" dataKey="info" stackId="1" fill={CHART_COLORS.info} stroke={CHART_COLORS.info} fillOpacity={0.7} />
+            <Area type="monotone" dataKey="debug" stackId="1" fill={CHART_COLORS.debug} stroke={CHART_COLORS.debug} fillOpacity={0.7} />
+            <Legend />
+          </AreaChart>
+        </ResponsiveContainer>
+      </div>
+
+      <div className={`analytics-row ${isMobile ? 'analytics-row-mobile' : ''}`}>
+        <div className="analytics-card">
+          <h3>Error Rate %</h3>
+          <ResponsiveContainer width="100%" height={chartHeight}>
+            <LineChart data={errorRateData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+              <XAxis dataKey="time" tickFormatter={formatXAxis} stroke="#6b7280" fontSize={11} />
+              <YAxis stroke="#6b7280" fontSize={11} unit="%" />
+              <Tooltip
+                contentStyle={{ background: '#161616', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}
+                labelFormatter={formatLabel}
+                formatter={(value: number | undefined) => [`${value ?? 0}%`, 'Error Rate']}
+              />
+              <Line type="monotone" dataKey="rate" stroke={CHART_COLORS.error} strokeWidth={2} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="analytics-card">
+          <h3>Top Error Categories</h3>
+          {data.top_error_categories.length > 0 ? (
+            <ResponsiveContainer width="100%" height={chartHeight}>
+              <BarChart data={data.top_error_categories} layout="vertical" margin={{ left: 20 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis type="number" stroke="#6b7280" fontSize={11} />
+                <YAxis dataKey="category" type="category" stroke="#6b7280" fontSize={11} width={80} />
+                <Tooltip
+                  contentStyle={{ background: '#161616', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}
+                />
+                <Bar dataKey="count" fill={CHART_COLORS.error} radius={[0, 4, 4, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="analytics-empty-chart">No errors in this period</div>
+          )}
+        </div>
+      </div>
+
+      <div className={`analytics-row ${isMobile ? 'analytics-row-mobile' : ''}`}>
+        <div className="analytics-card">
+          <h3>Response Times (ms)</h3>
+          {perfData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={chartHeight}>
+              <LineChart data={perfData}>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                <XAxis dataKey="time" tickFormatter={formatXAxis} stroke="#6b7280" fontSize={11} />
+                <YAxis stroke="#6b7280" fontSize={11} />
+                <Tooltip
+                  contentStyle={{ background: '#161616', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}
+                  labelFormatter={formatLabel}
+                  formatter={(value: number | undefined) => [`${value ?? 0}ms`]}
+                />
+                <Line type="monotone" dataKey="p50" stroke="#22c55e" strokeWidth={2} dot={false} name="p50" />
+                <Line type="monotone" dataKey="p95" stroke="#f59e0b" strokeWidth={2} dot={false} name="p95" />
+                <Line type="monotone" dataKey="p99" stroke="#ef4444" strokeWidth={2} dot={false} name="p99" />
+                <Legend />
+              </LineChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="analytics-empty-chart">No duration data available</div>
+          )}
+        </div>
+
+        <div className="analytics-card">
+          <h3>Status Codes</h3>
+          {statusData.length > 0 ? (
+            <ResponsiveContainer width="100%" height={chartHeight}>
+              <PieChart>
+                <Pie
+                  data={statusData}
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={isMobile ? 50 : 60}
+                  outerRadius={isMobile ? 80 : 100}
+                  dataKey="value"
+                  label={({ name, value }) => `${name}: ${value}`}
+                  labelLine={false}
+                  fontSize={11}
+                >
+                  {statusData.map((entry) => (
+                    <Cell key={entry.name} fill={STATUS_COLORS[entry.name] || '#6b7280'} />
+                  ))}
+                </Pie>
+                <Tooltip
+                  contentStyle={{ background: '#161616', border: '1px solid rgba(255,255,255,0.1)', borderRadius: '6px', fontSize: '12px' }}
+                />
+                <Legend />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="analytics-empty-chart">No API data available</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'logs' | 'archives'>('logs');
+  const [activeTab, setActiveTab] = useState<'logs' | 'archives' | 'analytics'>('logs');
   const [logs, setLogs] = useState<Log[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [storage, setStorage] = useState<Storage | null>(null);
@@ -1270,6 +1495,9 @@ export default function App() {
           <button className={`tab ${activeTab === 'archives' ? 'active' : ''}`} onClick={() => setActiveTab('archives')}>
             archives ({archives.length})
           </button>
+          <button className={`tab ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>
+            analytics
+          </button>
         </div>
 
         {activeTab === 'logs' ? (
@@ -1364,7 +1592,7 @@ export default function App() {
               />
             )}
           </>
-        ) : (
+        ) : activeTab === 'archives' ? (
           <div className="mobile-archives">
             <div className="mobile-archives-header">
               <button className="btn btn-secondary" style={{ flex: 1, fontSize: '12px' }} onClick={handleRunArchive}>Archive Now</button>
@@ -1394,6 +1622,8 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : (
+          <AnalyticsDashboard isMobile={true} />
         )}
 
         {showBulkDelete && (
@@ -1473,6 +1703,9 @@ export default function App() {
         </button>
         <button className={`tab ${activeTab === 'archives' ? 'active' : ''}`} onClick={() => setActiveTab('archives')}>
           archives ({archives.length})
+        </button>
+        <button className={`tab ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>
+          analytics
         </button>
       </div>
 
@@ -1620,13 +1853,15 @@ export default function App() {
             </>
           )}
         </>
-      ) : (
+      ) : activeTab === 'archives' ? (
         <ArchivesSection
           archives={archives}
           onRunArchive={handleRunArchive}
           onDelete={handleDeleteArchive}
           timezone={userTimezone}
         />
+      ) : (
+        <AnalyticsDashboard isMobile={false} />
       )}
 
       {showBulkDelete && (

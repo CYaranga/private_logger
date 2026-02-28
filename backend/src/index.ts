@@ -117,7 +117,7 @@ async function cleanExpiredSessions(db: D1Database): Promise<void> {
 type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 type HttpMethod = 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'OPTIONS' | 'HEAD';
 
-type LogSource = 'ios' | 'android' | 'web' | 'desktop' | 'backend' | 'simulator' | 'cli' | 'api' | 'watch' | 'tv' | 'extension' | 'iot';
+type LogSource = 'ios' | 'android' | 'web' | 'desktop' | 'backend' | 'simulator' | 'cli' | 'api' | 'watch' | 'tv' | 'extension' | 'iot' | 'rebeca-web-desktop' | 'rebeca-web-mobile';
 
 type Log = {
   id: number;
@@ -177,6 +177,7 @@ app.use('/*', cors({
     if (!origin) return null;
     if (origin === 'https://chrisyaranga.dev') return origin;
     if (origin === 'https://logger.chrisyaranga.dev') return origin;
+    if (origin === 'https://rebeca.app') return origin;
     if (/^http:\/\/localhost:300\d$/.test(origin)) return origin;
     if (origin === 'http://localhost:5173') return origin;
     return null;
@@ -799,6 +800,160 @@ app.get('/stats', async (c) => {
   } catch (error) {
     console.error('Error fetching stats:', error);
     return c.json({ error: 'Failed to fetch stats' }, 500);
+  }
+});
+
+// Get time-series analytics for the dashboard
+app.get('/stats/timeseries', async (c) => {
+  try {
+    const range = c.req.query('range') || '24h';
+
+    let strftimeFmt: string;
+    let cutoff: string;
+
+    switch (range) {
+      case '1h':
+        strftimeFmt = '%Y-%m-%dT%H:%M:00Z';
+        cutoff = '-1 hours';
+        break;
+      case '6h':
+        strftimeFmt = '%Y-%m-%dT%H:00:00Z';
+        cutoff = '-6 hours';
+        break;
+      case '7d':
+        strftimeFmt = '%Y-%m-%dT00:00:00Z';
+        cutoff = '-7 days';
+        break;
+      case '24h':
+      default:
+        strftimeFmt = '%Y-%m-%dT%H:00:00Z';
+        cutoff = '-24 hours';
+        break;
+    }
+
+    // Main bucket query: counts by level, avg duration
+    const { results: bucketRows } = await c.env.DB.prepare(`
+      SELECT
+        strftime('${strftimeFmt}', created_at) AS bucket,
+        COUNT(*) AS total,
+        SUM(CASE WHEN level = 'debug' THEN 1 ELSE 0 END) AS debug_count,
+        SUM(CASE WHEN level = 'info'  THEN 1 ELSE 0 END) AS info_count,
+        SUM(CASE WHEN level = 'warn'  THEN 1 ELSE 0 END) AS warn_count,
+        SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS error_count,
+        AVG(duration_ms) AS avg_duration_ms
+      FROM logs
+      WHERE created_at >= datetime('now', '${cutoff}')
+      GROUP BY bucket
+      ORDER BY bucket ASC
+    `).all<{
+      bucket: string;
+      total: number;
+      debug_count: number;
+      info_count: number;
+      warn_count: number;
+      error_count: number;
+      avg_duration_ms: number | null;
+    }>();
+
+    const rows = bucketRows || [];
+
+    // Check if any bucket has duration data
+    const hasDurations = rows.some(r => r.avg_duration_ms !== null);
+
+    // Compute per-bucket percentiles only if there is duration data
+    const percentileMap: Record<string, { p50: number | null; p95: number | null; p99: number | null }> = {};
+
+    if (hasDurations) {
+      // Fetch all durations in the range, grouped by bucket, sorted ascending
+      const { results: durationRows } = await c.env.DB.prepare(`
+        SELECT
+          strftime('${strftimeFmt}', created_at) AS bucket,
+          duration_ms
+        FROM logs
+        WHERE created_at >= datetime('now', '${cutoff}')
+          AND duration_ms IS NOT NULL
+        ORDER BY bucket ASC, duration_ms ASC
+      `).all<{ bucket: string; duration_ms: number }>();
+
+      // Group durations by bucket
+      const grouped: Record<string, number[]> = {};
+      for (const row of durationRows || []) {
+        if (!grouped[row.bucket]) grouped[row.bucket] = [];
+        grouped[row.bucket].push(row.duration_ms);
+      }
+
+      // Calculate percentiles from sorted arrays
+      for (const [bucket, durations] of Object.entries(grouped)) {
+        const n = durations.length;
+        const p50Idx = Math.min(Math.floor(n * 0.5), n - 1);
+        const p95Idx = Math.min(Math.floor(n * 0.95), n - 1);
+        const p99Idx = Math.min(Math.floor(n * 0.99), n - 1);
+        percentileMap[bucket] = {
+          p50: durations[p50Idx],
+          p95: durations[p95Idx],
+          p99: durations[p99Idx],
+        };
+      }
+    }
+
+    // Build the final buckets array
+    const buckets = rows.map(r => {
+      const pctls = percentileMap[r.bucket] || { p50: null, p95: null, p99: null };
+      return {
+        timestamp: r.bucket,
+        total: r.total,
+        by_level: {
+          debug: r.debug_count,
+          info: r.info_count,
+          warn: r.warn_count,
+          error: r.error_count,
+        },
+        error_rate: r.total > 0 ? r.error_count / r.total : 0,
+        avg_duration_ms: r.avg_duration_ms !== null ? Math.round(r.avg_duration_ms * 100) / 100 : null,
+        p50_duration_ms: pctls.p50,
+        p95_duration_ms: pctls.p95,
+        p99_duration_ms: pctls.p99,
+      };
+    });
+
+    // Top error categories (top 10)
+    const { results: errorCategories } = await c.env.DB.prepare(`
+      SELECT category, COUNT(*) AS count
+      FROM logs
+      WHERE created_at >= datetime('now', '${cutoff}')
+        AND level = 'error'
+      GROUP BY category
+      ORDER BY count DESC
+      LIMIT 10
+    `).all<{ category: string; count: number }>();
+
+    // Status code distribution grouped into 2xx, 3xx, 4xx, 5xx, other
+    const { results: statusRows } = await c.env.DB.prepare(`
+      SELECT
+        CASE
+          WHEN status_code >= 200 AND status_code < 300 THEN '2xx'
+          WHEN status_code >= 300 AND status_code < 400 THEN '3xx'
+          WHEN status_code >= 400 AND status_code < 500 THEN '4xx'
+          WHEN status_code >= 500 AND status_code < 600 THEN '5xx'
+          ELSE 'other'
+        END AS status_group,
+        COUNT(*) AS count
+      FROM logs
+      WHERE created_at >= datetime('now', '${cutoff}')
+        AND status_code IS NOT NULL
+      GROUP BY status_group
+      ORDER BY status_group ASC
+    `).all<{ status_group: string; count: number }>();
+
+    return c.json({
+      buckets,
+      top_error_categories: (errorCategories || []).map(r => ({ category: r.category, count: r.count })),
+      status_code_distribution: (statusRows || []).map(r => ({ group: r.status_group, count: r.count })),
+      range,
+    });
+  } catch (error) {
+    console.error('Error fetching timeseries stats:', error);
+    return c.json({ error: 'Failed to fetch timeseries stats' }, 500);
   }
 });
 

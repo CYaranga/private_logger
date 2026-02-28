@@ -1,4 +1,4 @@
-import type { LogsResponse, Stats, Filters, Storage, Archive } from './types';
+import type { LogsResponse, Stats, Filters, Storage, Archive, TimeRange, TimeseriesResponse } from './types';
 
 const API_BASE = 'https://private-logger-api.christian-yaranga-05.workers.dev';
 
@@ -148,4 +148,10 @@ export function getArchiveDownloadUrl(date: string): string {
 
 export function getExportAllUrl(): string {
   return `${API_BASE}/archives/export-all`;
+}
+
+export async function fetchTimeseries(range: TimeRange = '24h'): Promise<TimeseriesResponse> {
+  const response = await fetch(`${API_BASE}/stats/timeseries?range=${range}`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch timeseries');
+  return response.json();
 }
