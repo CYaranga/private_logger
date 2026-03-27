@@ -178,8 +178,7 @@ app.use('/*', cors({
     if (origin === 'https://chrisyaranga.dev') return origin;
     if (origin === 'https://logger.chrisyaranga.dev') return origin;
     if (origin === 'https://rebeca.app') return origin;
-    if (/^http:\/\/localhost:300\d$/.test(origin)) return origin;
-    if (origin === 'http://localhost:5173') return origin;
+    if (origin.startsWith('http://localhost:')) return origin;
     return null;
   },
   allowMethods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
