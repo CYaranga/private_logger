@@ -1279,23 +1279,41 @@ async function scheduled(
     console.error('Behaviour retry failed:', error);
   }
 
-  // 3. Purge old individual events (keep aggregates forever)
-  try {
-    const purgeEvents = await env.ANALYTICS_DB.prepare(
-      `DELETE FROM behaviour_events WHERE created_at < datetime('now', '-90 days')`
-    ).run();
-    const purgeUsers = await env.ANALYTICS_DB.prepare(
-      `DELETE FROM daily_users WHERE date < date('now', '-90 days')`
-    ).run();
-    const eventsDeleted = purgeEvents.meta.changes ?? 0;
-    const usersDeleted = purgeUsers.meta.changes ?? 0;
-    if (eventsDeleted > 0 || usersDeleted > 0) {
-      console.log(`Purged ${eventsDeleted} old events, ${usersDeleted} old daily_users rows`);
-    }
-  } catch (error) {
-    console.error('Purge failed:', error);
-  }
 }
+
+app.post('/admin/reprocess', async (c) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM logs WHERE category = 'USER_ACTION' ORDER BY created_at ASC`
+    ).all<Log>();
+
+    let processed = 0;
+    let failed = 0;
+    for (const log of results ?? []) {
+      try {
+        await processBehaviourLog(c.env.ANALYTICS_DB, {
+          user_id: log.user_id,
+          device_id: log.device_id,
+          message: log.message,
+          metadata: log.metadata,
+          environment: log.environment,
+          source: log.source,
+          created_at: log.created_at,
+        });
+        await c.env.DB.prepare('DELETE FROM logs WHERE id = ?').bind(log.id).run();
+        processed++;
+      } catch (e) {
+        failed++;
+        console.error(`Reprocess failed for log ${log.id}:`, e);
+      }
+    }
+
+    return c.json({ processed, failed, total: (results ?? []).length });
+  } catch (error) {
+    console.error('Reprocess error:', error);
+    return c.json({ error: 'Reprocess failed' }, 500);
+  }
+});
 
 export default {
   fetch: app.fetch,
