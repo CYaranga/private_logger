@@ -4,6 +4,7 @@ import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 
 type Bindings = {
   DB: D1Database;
+  ANALYTICS_DB: D1Database;
 };
 
 type User = {
@@ -169,6 +170,54 @@ const STORAGE_WARNING_THRESHOLD = 0.8; // Warn at 80%
 const STORAGE_ARCHIVE_THRESHOLD = 0.7; // Archive when reaching 70%
 const DAYS_TO_KEEP_IN_LOGS = 7; // Keep 7 days in main logs table
 
+const BEHAVIOUR_CATEGORIES = new Set(['USER_ACTION']);
+
+async function processBehaviourLog(
+  analyticsDb: D1Database,
+  log: { user_id: string; device_id: string | null; message: string;
+         metadata: string | null; environment: string; source: string | null;
+         created_at: string }
+): Promise<void> {
+  const parts = log.message.split(':');
+  const action = parts[0] ?? 'unknown';
+  const subject = parts.slice(1).join(':') || 'unknown';
+  const date = log.created_at.slice(0, 10);
+  const parsed: Record<string, unknown> = log.metadata ? JSON.parse(log.metadata) : {};
+  const screen = (parsed.screen as string) ?? null;
+
+  await analyticsDb.prepare(
+    `INSERT INTO behaviour_events
+       (user_id, device_id, action, subject, screen, metadata, environment, source, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(log.user_id, log.device_id, action, subject, screen,
+         log.metadata, log.environment, log.source, log.created_at).run();
+
+  await analyticsDb.prepare(
+    `INSERT INTO daily_aggregates (date, action, subject, environment, source, count, unique_users)
+     VALUES (?, ?, ?, ?, ?, 1, 0)
+     ON CONFLICT(date, action, subject, environment, source)
+     DO UPDATE SET count = count + 1`
+  ).bind(date, action, subject, log.environment, log.source).run();
+
+  await analyticsDb.prepare(
+    `INSERT OR IGNORE INTO daily_users (date, action, subject, user_id, environment, source)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).bind(date, action, subject, log.user_id, log.environment, log.source).run();
+
+  const row = await analyticsDb.prepare(
+    `SELECT COUNT(*) as cnt FROM daily_users
+     WHERE date = ? AND action = ? AND subject = ? AND environment = ?
+       AND (source IS ? OR (source IS NULL AND ? IS NULL))`
+  ).bind(date, action, subject, log.environment, log.source, log.source)
+   .first<{ cnt: number }>();
+
+  await analyticsDb.prepare(
+    `UPDATE daily_aggregates SET unique_users = ?
+     WHERE date = ? AND action = ? AND subject = ? AND environment = ?
+       AND (source IS ? OR (source IS NULL AND ? IS NULL))`
+  ).bind(row?.cnt ?? 0, date, action, subject, log.environment, log.source, log.source).run();
+}
+
 const app = new Hono<{ Bindings: Bindings }>();
 
 // Enable CORS for frontend
@@ -178,6 +227,7 @@ app.use('/*', cors({
     if (origin === 'https://chrisyaranga.dev') return origin;
     if (origin === 'https://logger.chrisyaranga.dev') return origin;
     if (origin === 'https://rebeca.app') return origin;
+    if (origin === 'https://rebeca.travel') return origin;
     if (origin.startsWith('http://localhost:')) return origin;
     return null;
   },
@@ -344,6 +394,26 @@ app.post('/logs', async (c) => {
     )
       .bind(body.user_id, device_id, body.message, metadata, environment, source, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
       .first<Log>();
+
+    // Process behaviour logs into analytics D1
+    if (result && BEHAVIOUR_CATEGORIES.has(category)) {
+      try {
+        await processBehaviourLog(c.env.ANALYTICS_DB, {
+          user_id: body.user_id,
+          device_id: device_id,
+          message: body.message,
+          metadata: metadata,
+          environment: environment,
+          source: source,
+          created_at: result.created_at,
+        });
+        // Delete from raw logs to free space
+        await c.env.DB.prepare('DELETE FROM logs WHERE id = ?')
+          .bind(result.id).run();
+      } catch (e) {
+        console.error('Behaviour processing failed, log retained in raw DB:', e);
+      }
+    }
 
     return c.json({ success: true, log: result }, 201);
   } catch (error) {
