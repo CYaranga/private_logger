@@ -1233,19 +1233,67 @@ async function archiveOldLogs(db: D1Database): Promise<{
   return { archived: totalArchived, dates };
 }
 
-// Scheduled handler for automatic archiving
+// Scheduled handler for automatic archiving, behaviour retry, and purge
 async function scheduled(
   _event: ScheduledEvent,
   env: Bindings,
   _ctx: ExecutionContext
 ): Promise<void> {
-  console.log('Running scheduled archive job...');
+  console.log('Running scheduled jobs...');
 
+  // 1. Archive old logs (existing)
   try {
     const result = await archiveOldLogs(env.DB);
     console.log(`Archived ${result.archived} logs from dates: ${result.dates.join(', ')}`);
   } catch (error) {
     console.error('Scheduled archive failed:', error);
+  }
+
+  // 2. Retry stale behaviour logs (failed inline processing)
+  try {
+    const stale = await env.DB.prepare(
+      `SELECT * FROM logs WHERE category = 'USER_ACTION'
+       AND created_at < datetime('now', '-1 hour')`
+    ).all<Log>();
+
+    let retried = 0;
+    for (const log of stale.results ?? []) {
+      try {
+        await processBehaviourLog(env.ANALYTICS_DB, {
+          user_id: log.user_id,
+          device_id: log.device_id,
+          message: log.message,
+          metadata: log.metadata,
+          environment: log.environment,
+          source: log.source,
+          created_at: log.created_at,
+        });
+        await env.DB.prepare('DELETE FROM logs WHERE id = ?').bind(log.id).run();
+        retried++;
+      } catch (e) {
+        console.error(`Retry failed for log ${log.id}:`, e);
+      }
+    }
+    if (retried > 0) console.log(`Retried ${retried} stale behaviour logs`);
+  } catch (error) {
+    console.error('Behaviour retry failed:', error);
+  }
+
+  // 3. Purge old individual events (keep aggregates forever)
+  try {
+    const purgeEvents = await env.ANALYTICS_DB.prepare(
+      `DELETE FROM behaviour_events WHERE created_at < datetime('now', '-90 days')`
+    ).run();
+    const purgeUsers = await env.ANALYTICS_DB.prepare(
+      `DELETE FROM daily_users WHERE date < date('now', '-90 days')`
+    ).run();
+    const eventsDeleted = purgeEvents.meta.changes ?? 0;
+    const usersDeleted = purgeUsers.meta.changes ?? 0;
+    if (eventsDeleted > 0 || usersDeleted > 0) {
+      console.log(`Purged ${eventsDeleted} old events, ${usersDeleted} old daily_users rows`);
+    }
+  } catch (error) {
+    console.error('Purge failed:', error);
   }
 }
 
