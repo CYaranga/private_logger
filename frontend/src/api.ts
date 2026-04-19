@@ -1,4 +1,4 @@
-import type { LogsResponse, Stats, Filters, Storage, Archive, TimeRange, TimeseriesResponse } from './types';
+import type { LogsResponse, Stats, Filters, Storage, Archive, TimeRange, TimeseriesResponse, LogReplay, CreateReplayInput } from './types';
 
 const API_BASE = 'https://private-logger-api.christian-yaranga-05.workers.dev';
 
@@ -154,4 +154,32 @@ export async function fetchTimeseries(range: TimeRange = '24h'): Promise<Timeser
   const response = await fetch(`${API_BASE}/stats/timeseries?range=${range}`, getFetchOptions());
   if (!response.ok) throw new Error('Failed to fetch timeseries');
   return response.json();
+}
+
+export async function fetchReplays(logId: number): Promise<LogReplay[]> {
+  const response = await fetch(`${API_BASE}/logs/${logId}/replays`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch replays');
+  const data = await response.json();
+  return data.replays;
+}
+
+export async function createReplay(input: CreateReplayInput): Promise<LogReplay> {
+  const response = await fetch(`${API_BASE}/replay`, getFetchOptions({
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  }));
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to create replay');
+  }
+  const data = await response.json();
+  return data.replay;
+}
+
+export async function deleteReplay(replayId: number): Promise<void> {
+  const response = await fetch(`${API_BASE}/replays/${replayId}`, getFetchOptions({
+    method: 'DELETE',
+  }));
+  if (!response.ok) throw new Error('Failed to delete replay');
 }

@@ -92,3 +92,28 @@ export interface TimeseriesResponse {
   status_code_distribution: { group: string; count: number }[];
   range: TimeRange;
 }
+
+export interface LogReplay {
+  id: number;
+  parent_log_id: number;
+  version: number;
+  http_method: HttpMethod;
+  endpoint: string;
+  query_params: Record<string, string> | null;
+  headers: Record<string, string> | null;
+  request_data: unknown;
+  response_data: unknown;
+  status_code: number | null;
+  duration_ms: number | null;
+  error: string | null;
+  created_at: string;
+}
+
+export interface CreateReplayInput {
+  parent_log_id: number;
+  http_method: HttpMethod;
+  endpoint: string;
+  query_params?: Record<string, string>;
+  headers?: Record<string, string>;
+  body?: unknown;
+}
