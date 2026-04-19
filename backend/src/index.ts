@@ -1,6 +1,9 @@
 import { Hono, type Context, type Next } from 'hono';
 import { cors } from 'hono/cors';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
+import { validateReplayUrl } from './replay/ssrf';
+import { sanitizeHeadersForStorage } from './replay/sanitize';
+import { executeReplay } from './replay/handler';
 
 type Bindings = {
   DB: D1Database;
@@ -172,6 +175,16 @@ const DAYS_TO_KEEP_IN_LOGS = 7; // Keep 7 days in main logs table
 
 const BEHAVIOUR_CATEGORIES = new Set(['USER_ACTION']);
 
+function resolveSource(parsed: Record<string, unknown>): string | null {
+  const os = parsed.os as string | undefined;
+  const platform = parsed.platform as string | undefined;
+  if (os === 'ios' || platform === 'travel-mobile-ios') return 'ios';
+  if (os === 'android' || platform === 'travel-mobile-android') return 'android';
+  if (platform === 'mobile' || platform === 'travel-mobile-web') return 'web-mobile';
+  if (platform === 'web' || platform === 'travel-web') return 'web-desktop';
+  return platform ?? null;
+}
+
 async function processBehaviourLog(
   analyticsDb: D1Database,
   log: { user_id: string; device_id: string | null; message: string;
@@ -184,38 +197,39 @@ async function processBehaviourLog(
   const date = log.created_at.slice(0, 10);
   const parsed: Record<string, unknown> = log.metadata ? JSON.parse(log.metadata) : {};
   const screen = (parsed.screen as string) ?? null;
+  const source = log.source ?? resolveSource(parsed);
 
   await analyticsDb.prepare(
     `INSERT INTO behaviour_events
        (user_id, device_id, action, subject, screen, metadata, environment, source, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(log.user_id, log.device_id, action, subject, screen,
-         log.metadata, log.environment, log.source, log.created_at).run();
+         log.metadata, log.environment, source, log.created_at).run();
 
   await analyticsDb.prepare(
     `INSERT INTO daily_aggregates (date, action, subject, environment, source, count, unique_users)
      VALUES (?, ?, ?, ?, ?, 1, 0)
      ON CONFLICT(date, action, subject, environment, source)
      DO UPDATE SET count = count + 1`
-  ).bind(date, action, subject, log.environment, log.source).run();
+  ).bind(date, action, subject, log.environment, source).run();
 
   await analyticsDb.prepare(
     `INSERT OR IGNORE INTO daily_users (date, action, subject, user_id, environment, source)
      VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(date, action, subject, log.user_id, log.environment, log.source).run();
+  ).bind(date, action, subject, log.user_id, log.environment, source).run();
 
   const row = await analyticsDb.prepare(
     `SELECT COUNT(*) as cnt FROM daily_users
      WHERE date = ? AND action = ? AND subject = ? AND environment = ?
        AND (source IS ? OR (source IS NULL AND ? IS NULL))`
-  ).bind(date, action, subject, log.environment, log.source, log.source)
+  ).bind(date, action, subject, log.environment, source, source)
    .first<{ cnt: number }>();
 
   await analyticsDb.prepare(
     `UPDATE daily_aggregates SET unique_users = ?
      WHERE date = ? AND action = ? AND subject = ? AND environment = ?
        AND (source IS ? OR (source IS NULL AND ? IS NULL))`
-  ).bind(row?.cnt ?? 0, date, action, subject, log.environment, log.source, log.source).run();
+  ).bind(row?.cnt ?? 0, date, action, subject, log.environment, source, source).run();
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -438,6 +452,32 @@ function tryParseJSON(str: string): unknown {
   } catch {
     return str;
   }
+}
+
+type LogReplay = {
+  id: number;
+  parent_log_id: number;
+  version: number;
+  http_method: string;
+  endpoint: string;
+  query_params: string | null;
+  headers: string | null;
+  request_data: string | null;
+  response_data: string | null;
+  status_code: number | null;
+  duration_ms: number | null;
+  error: string | null;
+  created_at: string;
+};
+
+function parseReplayFields(r: LogReplay): Record<string, unknown> {
+  return {
+    ...r,
+    query_params: r.query_params ? tryParseJSON(r.query_params) : null,
+    headers: r.headers ? tryParseJSON(r.headers) : null,
+    request_data: r.request_data ? tryParseJSON(r.request_data) : null,
+    response_data: r.response_data ? tryParseJSON(r.response_data) : null,
+  };
 }
 
 // Get all logs with optional filtering
@@ -1312,6 +1352,126 @@ app.post('/admin/reprocess', async (c) => {
   } catch (error) {
     console.error('Reprocess error:', error);
     return c.json({ error: 'Reprocess failed' }, 500);
+  }
+});
+
+// ============================================================
+// Endpoint Replay
+// ============================================================
+
+const REPLAY_TIMEOUT_MS = 30_000;
+
+app.get('/logs/:id/replays', authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    if (Number.isNaN(id)) return c.json({ error: 'Invalid log id' }, 400);
+
+    const { results } = await c.env.DB.prepare(
+      'SELECT * FROM log_replays WHERE parent_log_id = ? ORDER BY version ASC'
+    ).bind(id).all<LogReplay>();
+
+    return c.json({ replays: (results ?? []).map(parseReplayFields) });
+  } catch (error) {
+    console.error('Error fetching replays:', error);
+    return c.json({ error: 'Failed to fetch replays' }, 500);
+  }
+});
+
+app.post('/replay', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json<{
+      parent_log_id: number;
+      http_method: string;
+      endpoint: string;
+      query_params?: Record<string, string>;
+      headers?: Record<string, string>;
+      body?: unknown;
+    }>();
+
+    if (!body.parent_log_id || !body.http_method || !body.endpoint) {
+      return c.json({ error: 'parent_log_id, http_method, endpoint required' }, 400);
+    }
+
+    const parent = await c.env.DB.prepare(
+      'SELECT id, http_method, endpoint FROM logs WHERE id = ?'
+    ).bind(body.parent_log_id).first<{ id: number; http_method: string | null; endpoint: string | null }>();
+
+    if (!parent) return c.json({ error: 'Parent log not found' }, 404);
+    if (!parent.http_method || !parent.endpoint) {
+      return c.json({ error: 'Parent log is not an API call' }, 400);
+    }
+    if (parent.http_method !== body.http_method || parent.endpoint !== body.endpoint) {
+      return c.json({ error: 'http_method and endpoint must match parent log' }, 400);
+    }
+
+    const ssrf = validateReplayUrl(body.endpoint);
+    if (!ssrf.ok) {
+      return c.json({ error: `URL rejected: ${ssrf.reason}` }, 400);
+    }
+
+    const maxRow = await c.env.DB.prepare(
+      'SELECT MAX(version) as max_version FROM log_replays WHERE parent_log_id = ?'
+    ).bind(body.parent_log_id).first<{ max_version: number | null }>();
+
+    const nextVersion = Math.max((maxRow?.max_version ?? 1) + 1, 2);
+
+    const result = await executeReplay({
+      method: body.http_method,
+      endpoint: body.endpoint,
+      queryParams: body.query_params ?? {},
+      headers: body.headers ?? {},
+      body: body.body,
+      fetchImpl: fetch,
+      timeoutMs: REPLAY_TIMEOUT_MS,
+    });
+
+    const storedHeaders = sanitizeHeadersForStorage(body.headers ?? {});
+
+    const inserted = await c.env.DB.prepare(
+      `INSERT INTO log_replays
+       (parent_log_id, version, http_method, endpoint, query_params, headers,
+        request_data, response_data, status_code, duration_ms, error)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
+    ).bind(
+      body.parent_log_id,
+      nextVersion,
+      body.http_method,
+      body.endpoint,
+      body.query_params ? JSON.stringify(body.query_params) : null,
+      Object.keys(storedHeaders).length ? JSON.stringify(storedHeaders) : null,
+      body.body === undefined
+        ? null
+        : (typeof body.body === 'string' ? body.body : JSON.stringify(body.body)),
+      result.responseData === null
+        ? null
+        : (typeof result.responseData === 'string'
+            ? result.responseData
+            : JSON.stringify(result.responseData)),
+      result.statusCode,
+      result.durationMs,
+      result.error,
+    ).first<LogReplay>();
+
+    return c.json({ replay: inserted ? parseReplayFields(inserted) : null }, 201);
+  } catch (error) {
+    console.error('Replay error:', error);
+    return c.json({ error: 'Failed to execute replay' }, 500);
+  }
+});
+
+app.delete('/replays/:id', authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    if (Number.isNaN(id)) return c.json({ error: 'Invalid replay id' }, 400);
+
+    const result = await c.env.DB.prepare('DELETE FROM log_replays WHERE id = ?')
+      .bind(id).run();
+
+    if (result.meta.changes === 0) return c.json({ error: 'Replay not found' }, 404);
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Error deleting replay:', error);
+    return c.json({ error: 'Failed to delete replay' }, 500);
   }
 });
 
