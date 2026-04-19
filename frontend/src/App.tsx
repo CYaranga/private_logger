@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import type { Log, Stats, Filters, Storage, Archive, LogLevel, HttpMethod } from './types';
+import { ReplayTabs } from './Replay';
 import {
   fetchLogs,
   fetchStats,
@@ -673,19 +674,13 @@ function LogRow({
                   <h4>Metadata</h4>
                   <JsonViewer data={log.metadata} label="Metadata" />
                 </div>
-                {isApiCall && (
-                  <>
-                    <div className="log-detail-section">
-                      <h4>Request Data</h4>
-                      <JsonViewer data={log.request_data} label="Request" />
-                    </div>
-                    <div className="log-detail-section">
-                      <h4>Response Data</h4>
-                      <JsonViewer data={log.response_data} label="Response" />
-                    </div>
-                  </>
-                )}
               </div>
+              {isApiCall && (
+                <div className="log-detail-section">
+                  <h4>Replay &amp; Versions</h4>
+                  <ReplayTabs log={log} JsonViewer={JsonViewer} />
+                </div>
+              )}
             </div>
           </td>
         </tr>
@@ -961,12 +956,8 @@ function MobileLogCard({
                 </div>
               )}
               <div className="log-detail-section">
-                <h4>Request Data</h4>
-                <JsonViewer data={log.request_data} label="Request" />
-              </div>
-              <div className="log-detail-section">
-                <h4>Response Data</h4>
-                <JsonViewer data={log.response_data} label="Response" />
+                <h4>Replay &amp; Versions</h4>
+                <ReplayTabs log={log} JsonViewer={JsonViewer} />
               </div>
             </>
           )}
