@@ -157,6 +157,13 @@ type CreateLogInput = {
   metadata?: Record<string, unknown>;
   environment?: 'dev' | 'test' | 'prod';
   source?: LogSource;
+  /**
+   * Top-level app identifier sent by clients (e.g. 'travel-mobile-ios',
+   * 'travel-mobile-android', 'travel-mobile-web', 'travel-web'). Used as
+   * fallback for resolving `source` when it is not set and metadata does
+   * not carry platform/os info. Optional passthrough — no schema migration.
+   */
+  app?: string;
   level?: LogLevel;
   category?: string;
   http_method?: HttpMethod;
@@ -175,14 +182,15 @@ const DAYS_TO_KEEP_IN_LOGS = 7; // Keep 7 days in main logs table
 
 const BEHAVIOUR_CATEGORIES = new Set(['USER_ACTION']);
 
-function resolveSource(parsed: Record<string, unknown>): string | null {
+function resolveSource(
+  body: Partial<CreateLogInput> | null | undefined,
+  parsed: Record<string, unknown>
+): string | null {
+  if (body && typeof body.source === 'string' && body.source) return body.source;
+  if (body && typeof body.app === 'string' && body.app) return body.app;
   const os = parsed.os as string | undefined;
   const platform = parsed.platform as string | undefined;
-  if (os === 'ios' || platform === 'travel-mobile-ios') return 'ios';
-  if (os === 'android' || platform === 'travel-mobile-android') return 'android';
-  if (platform === 'mobile' || platform === 'travel-mobile-web') return 'web-mobile';
-  if (platform === 'web' || platform === 'travel-web') return 'web-desktop';
-  return platform ?? null;
+  return platform ?? os ?? null;
 }
 
 async function processBehaviourLog(
@@ -197,7 +205,10 @@ async function processBehaviourLog(
   const date = log.created_at.slice(0, 10);
   const parsed: Record<string, unknown> = log.metadata ? JSON.parse(log.metadata) : {};
   const screen = (parsed.screen as string) ?? null;
-  const source = log.source ?? resolveSource(parsed);
+  // When processing a stored log row (retry / reprocess paths), we no longer
+  // have the original top-level `app` field — only log.source. resolveSource
+  // still falls back to metadata.platform / metadata.os for legacy rows.
+  const source = log.source ?? resolveSource(null, parsed);
 
   await analyticsDb.prepare(
     `INSERT INTO behaviour_events
@@ -387,7 +398,11 @@ app.post('/logs', async (c) => {
 
     const metadata = body.metadata ? JSON.stringify(body.metadata) : null;
     const environment = body.environment || 'dev';
-    const source = body.source || null;
+    // Resolve source from body.source → body.app → metadata.platform → metadata.os → null.
+    // Clients (e.g. mobile app) send the app identifier at the top level as `app`;
+    // metadata typically does not carry os/platform, so we accept both.
+    const parsedMetadataForSource: Record<string, unknown> = body.metadata ?? {};
+    const source = resolveSource(body, parsedMetadataForSource);
     const level = body.level || 'info';
     const category = body.category || 'GENERAL';
     const device_id = body.device_id || null;

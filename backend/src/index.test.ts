@@ -4,12 +4,13 @@ import { env, SELF } from 'cloudflare:test';
 declare module 'cloudflare:test' {
   interface ProvidedEnv {
     DB: D1Database;
+    ANALYTICS_DB: D1Database;
   }
 }
 
 // Helper to setup database schema
 async function setupDatabase() {
-  await env.DB.exec(`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, device_id TEXT, message TEXT NOT NULL, metadata TEXT, environment TEXT DEFAULT 'dev', created_at DATETIME DEFAULT CURRENT_TIMESTAMP, level TEXT DEFAULT 'info', category TEXT DEFAULT 'GENERAL', http_method TEXT, endpoint TEXT, request_data TEXT, response_data TEXT, status_code INTEGER, duration_ms REAL)`);
+  await env.DB.exec(`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, device_id TEXT, message TEXT NOT NULL, metadata TEXT, environment TEXT DEFAULT 'dev', source TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, level TEXT DEFAULT 'info', category TEXT DEFAULT 'GENERAL', http_method TEXT, endpoint TEXT, request_data TEXT, response_data TEXT, status_code INTEGER, duration_ms REAL)`);
 
   await env.DB.exec(`CREATE TABLE IF NOT EXISTS archives (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_date TEXT NOT NULL UNIQUE, log_count INTEGER NOT NULL, data TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 
@@ -162,6 +163,96 @@ describe('Private Logger API', () => {
         body: JSON.stringify({ user_id: 'test' }),
       });
       expect(response.status).toBe(401);
+    });
+  });
+
+  describe('POST /logs — source resolution from payload.app', () => {
+    it('populates behaviour_events.source from top-level app when metadata is empty', async () => {
+      // Arrange: make sure analytics schema exists. Inline CREATE IF NOT EXISTS
+      // is idempotent and safe to call before each test run.
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS behaviour_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, device_id TEXT, action TEXT NOT NULL, subject TEXT NOT NULL, screen TEXT, metadata TEXT, environment TEXT DEFAULT 'dev', source TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS daily_aggregates (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, environment TEXT DEFAULT 'dev', source TEXT, count INTEGER DEFAULT 0, unique_users INTEGER DEFAULT 0, UNIQUE(date, action, subject, environment, source))`);
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS daily_users (date TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL, environment TEXT DEFAULT 'dev', source TEXT, UNIQUE(date, action, subject, user_id, environment, source))`);
+
+      // Act: POST a USER_ACTION log with top-level `app` and empty metadata.
+      // This simulates the mobile app payload that previously caused source = NULL.
+      const uniqueUserId = `test-user-app-field-${Date.now()}`;
+      const response = await SELF.fetch('https://example.com/logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: uniqueUserId,
+          message: 'tap:cta_home',
+          category: 'USER_ACTION',
+          app: 'travel-mobile-ios',
+          metadata: {},
+          environment: 'test',
+        }),
+      });
+
+      expect(response.status).toBe(201);
+
+      // Assert: behaviour_events row carries source='travel-mobile-ios'.
+      const row = await env.ANALYTICS_DB.prepare(
+        `SELECT user_id, action, subject, source FROM behaviour_events WHERE user_id = ?`
+      ).bind(uniqueUserId).first<{ user_id: string; action: string; subject: string; source: string | null }>();
+
+      expect(row).not.toBeNull();
+      expect(row?.source).toBe('travel-mobile-ios');
+      expect(row?.action).toBe('tap');
+      expect(row?.subject).toBe('cta_home');
+    });
+
+    it('prefers explicit body.source over body.app', async () => {
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS behaviour_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, device_id TEXT, action TEXT NOT NULL, subject TEXT NOT NULL, screen TEXT, metadata TEXT, environment TEXT DEFAULT 'dev', source TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS daily_aggregates (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, environment TEXT DEFAULT 'dev', source TEXT, count INTEGER DEFAULT 0, unique_users INTEGER DEFAULT 0, UNIQUE(date, action, subject, environment, source))`);
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS daily_users (date TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL, environment TEXT DEFAULT 'dev', source TEXT, UNIQUE(date, action, subject, user_id, environment, source))`);
+
+      const uniqueUserId = `test-user-source-pref-${Date.now()}`;
+      const response = await SELF.fetch('https://example.com/logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: uniqueUserId,
+          message: 'tap:cta',
+          category: 'USER_ACTION',
+          source: 'explicit-source',
+          app: 'travel-mobile-android',
+          metadata: {},
+          environment: 'test',
+        }),
+      });
+      expect(response.status).toBe(201);
+
+      const row = await env.ANALYTICS_DB.prepare(
+        `SELECT source FROM behaviour_events WHERE user_id = ?`
+      ).bind(uniqueUserId).first<{ source: string | null }>();
+      expect(row?.source).toBe('explicit-source');
+    });
+
+    it('falls back to metadata.platform when neither source nor app are provided', async () => {
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS behaviour_events (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, device_id TEXT, action TEXT NOT NULL, subject TEXT NOT NULL, screen TEXT, metadata TEXT, environment TEXT DEFAULT 'dev', source TEXT, created_at TEXT DEFAULT (datetime('now')))`);
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS daily_aggregates (id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, environment TEXT DEFAULT 'dev', source TEXT, count INTEGER DEFAULT 0, unique_users INTEGER DEFAULT 0, UNIQUE(date, action, subject, environment, source))`);
+      await env.ANALYTICS_DB.exec(`CREATE TABLE IF NOT EXISTS daily_users (date TEXT NOT NULL, action TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL, environment TEXT DEFAULT 'dev', source TEXT, UNIQUE(date, action, subject, user_id, environment, source))`);
+
+      const uniqueUserId = `test-user-platform-fallback-${Date.now()}`;
+      const response = await SELF.fetch('https://example.com/logs', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_id: uniqueUserId,
+          message: 'view:screen',
+          category: 'USER_ACTION',
+          metadata: { platform: 'travel-web' },
+          environment: 'test',
+        }),
+      });
+      expect(response.status).toBe(201);
+
+      const row = await env.ANALYTICS_DB.prepare(
+        `SELECT source FROM behaviour_events WHERE user_id = ?`
+      ).bind(uniqueUserId).first<{ source: string | null }>();
+      expect(row?.source).toBe('travel-web');
     });
   });
 });
