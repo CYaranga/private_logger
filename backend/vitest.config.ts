@@ -6,7 +6,7 @@ export default defineWorkersConfig({
       workers: {
         wrangler: { configPath: './wrangler.toml' },
         miniflare: {
-          d1Databases: ['DB'],
+          d1Databases: ['DB', 'ANALYTICS_DB'],
         },
       },
     },
