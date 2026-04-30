@@ -7,6 +7,7 @@ import { sanitizeHeadersForStorage } from './replay/sanitize';
 import { executeReplay } from './replay/handler';
 import { redactPii, redactValue } from './redact';
 import { computeFingerprint } from './fingerprint';
+import { snapshotRelatedLogIds, fetchLogsByIds } from './bugs';
 
 type Bindings = {
   DB: D1Database;
@@ -2010,6 +2011,70 @@ app.post('/admin/reprocess', async (c) => {
   } catch (error) {
     console.error('Reprocess error:', error);
     return c.json({ error: 'Reprocess failed' }, 500);
+  }
+});
+
+// Bug reports — public POST (single-user installation), authenticated read.
+// Description and breadcrumbs run through redactPii on insert.
+app.post('/bugs', async (c) => {
+  try {
+    const body = await c.req.json<{
+      user_id: string;
+      session_id?: string;
+      description: string;
+      severity?: 'low' | 'medium' | 'high' | 'critical';
+      device_model?: string;
+      os_version?: string;
+      app_version?: string;
+      network_type?: string;
+      breadcrumbs?: Array<Record<string, unknown>>;
+    }>();
+    if (!body.user_id || !body.description) {
+      return c.json({ error: 'user_id and description are required' }, 400);
+    }
+    const cleanDescription = redactPii(body.description);
+    const cleanBreadcrumbs = body.breadcrumbs
+      ? JSON.stringify(redactValue(body.breadcrumbs))
+      : null;
+    const sessionId = body.session_id ?? null;
+    const relatedIds = await snapshotRelatedLogIds(c.env.DB, body.user_id, sessionId);
+    const result = await c.env.DB.prepare(
+      `INSERT INTO bug_reports
+         (user_id, session_id, severity, description, device_model, os_version,
+          app_version, network_type, breadcrumbs, related_log_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    ).bind(
+      body.user_id, sessionId, body.severity ?? 'medium', cleanDescription,
+      body.device_model ?? null, body.os_version ?? null, body.app_version ?? null,
+      body.network_type ?? null, cleanBreadcrumbs, JSON.stringify(relatedIds),
+    ).first<{ id: number }>();
+    const id = result?.id;
+    return c.json({
+      id,
+      screenshot_upload_url: `/bugs/${id}/screenshot`,
+    }, 201);
+  } catch (error) {
+    console.error('Error creating bug:', error);
+    return c.json({ error: 'Failed to create bug' }, 500);
+  }
+});
+
+app.put('/bugs/:id/screenshot', async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    if (Number.isNaN(id)) return c.json({ error: 'invalid id' }, 400);
+    const contentType = c.req.header('content-type') ?? 'image/png';
+    const data = await c.req.arrayBuffer();
+    if (data.byteLength === 0) return c.json({ error: 'empty body' }, 400);
+    if (data.byteLength > 2 * 1024 * 1024) return c.json({ error: 'too large (max 2MB)' }, 413);
+    const key = `bugs/${id}/screenshot.png`;
+    await c.env.SCREENSHOTS.put(key, data, { httpMetadata: { contentType } });
+    await c.env.DB.prepare('UPDATE bug_reports SET screenshot_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(key, id).run();
+    return c.json({ success: true, key });
+  } catch (error) {
+    console.error('Error uploading screenshot:', error);
+    return c.json({ error: 'Failed to upload screenshot' }, 500);
   }
 });
 
