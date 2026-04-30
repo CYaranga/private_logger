@@ -2,7 +2,7 @@ import { Hono, type Context, type Next } from 'hono';
 import { cors } from 'hono/cors';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { validateReplayUrl } from './replay/ssrf';
-import { hashToken } from './tokens';
+import { generateTokenPlaintext, hashToken, tokenPrefix } from './tokens';
 import { sanitizeHeadersForStorage } from './replay/sanitize';
 import { executeReplay } from './replay/handler';
 import { redactPii, redactValue } from './redact';
@@ -467,6 +467,57 @@ const authMiddleware = async (c: Context<{ Bindings: Bindings }>, next: Next) =>
 
 // Auth middleware is available but not applied to API routes.
 // Authentication is handled on the frontend side only.
+
+// API token management. Plaintext is returned exactly once; only hash is stored.
+app.post('/auth/tokens', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json<{ name: string; expires_in_days?: number }>();
+    if (!body.name?.trim()) return c.json({ error: 'name is required' }, 400);
+    const user = c.get('user' as never) as User;
+    const plaintext = generateTokenPlaintext();
+    const hash = await hashToken(plaintext);
+    const prefix = tokenPrefix(plaintext);
+    const expiresAt = body.expires_in_days
+      ? new Date(Date.now() + body.expires_in_days * 86400_000).toISOString()
+      : null;
+    const result = await c.env.DB.prepare(
+      `INSERT INTO api_tokens (hash, prefix, name, user_id, expires_at)
+       VALUES (?, ?, ?, ?, ?) RETURNING id`
+    ).bind(hash, prefix, body.name.trim(), user.id, expiresAt).first<{ id: number }>();
+    return c.json({ id: result?.id, plaintext, prefix });
+  } catch (error) {
+    console.error('Error creating token:', error);
+    return c.json({ error: 'Failed to create token' }, 500);
+  }
+});
+
+app.get('/auth/tokens', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user' as never) as User;
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, prefix, name, created_at, expires_at, last_used
+       FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC`
+    ).bind(user.id).all();
+    return c.json({ tokens: results || [] });
+  } catch (error) {
+    console.error('Error listing tokens:', error);
+    return c.json({ error: 'Failed to list tokens' }, 500);
+  }
+});
+
+app.delete('/auth/tokens/:id', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user' as never) as User;
+    const id = parseInt(c.req.param('id'), 10);
+    const result = await c.env.DB.prepare(
+      'DELETE FROM api_tokens WHERE id = ? AND user_id = ?'
+    ).bind(id, user.id).run();
+    return c.json({ success: true, deleted: result.meta.changes });
+  } catch (error) {
+    console.error('Error revoking token:', error);
+    return c.json({ error: 'Failed to revoke token' }, 500);
+  }
+});
 
 // Create a new log entry
 app.post('/logs', async (c) => {
