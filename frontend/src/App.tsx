@@ -6,10 +6,15 @@ import { ErrorsTab } from './ErrorsTab';
 import { BehaviourTab } from './BehaviourTab';
 import { UserProfileModal } from './UserProfileModal';
 import { SessionTimelineModal } from './SessionTimelineModal';
+import { BugsTab } from './BugsTab';
+import { BugDetailModal } from './BugDetailModal';
+import { ApiTokensModal } from './ApiTokensModal';
+import type { TriageSummary } from './types';
+import { fetchTriageSummary } from './api';
 import {
   Activity, Users as UsersIcon, AlertTriangle, Archive as ArchiveIcon, BarChart3,
   Terminal, RefreshCw, LogOut, Download, Trash2, Inbox, Bookmark, BookmarkPlus, X,
-  Footprints, Radio,
+  Footprints, Radio, Bug, Key,
 } from 'lucide-react';
 import { loadViews, saveViews, createView, type SavedView } from './savedViews';
 import {
@@ -1401,7 +1406,10 @@ function AnalyticsDashboard({ isMobile }: { isMobile: boolean }) {
 
 export default function App() {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'logs' | 'users' | 'errors' | 'behaviour' | 'archives' | 'analytics'>('logs');
+  const [activeTab, setActiveTab] = useState<'logs' | 'users' | 'errors' | 'behaviour' | 'bugs' | 'archives' | 'analytics'>('logs');
+  const [openBugId, setOpenBugId] = useState<number | null>(null);
+  const [showTokens, setShowTokens] = useState(false);
+  const [triage, setTriage] = useState<TriageSummary | null>(null);
   const [openUserId, setOpenUserId] = useState<string | null>(null);
   const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [logs, setLogs] = useState<Log[]>([]);
@@ -1556,6 +1564,19 @@ export default function App() {
   }, [liveTail, perPage]);
 
   useEffect(() => { setPage(1); }, [filters, perPage]);
+
+  useEffect(() => {
+    fetchTriageSummary().then(setTriage).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const bugId = params.get('bug_id');
+    if (bugId) {
+      setOpenBugId(parseInt(bugId, 10));
+      setActiveTab('bugs');
+    }
+  }, []);
 
   const handleFilterChange = (key: keyof Filters, value: string) => {
     setFilters((prev) => ({ ...prev, [key]: value }));
@@ -1744,6 +1765,9 @@ export default function App() {
           <button className={`tab ${activeTab === 'errors' ? 'active' : ''}`} onClick={() => setActiveTab('errors')}>
             <AlertTriangle size={13} strokeWidth={1.6} /> errors
           </button>
+          <button className={`tab ${activeTab === 'bugs' ? 'active' : ''}`} onClick={() => setActiveTab('bugs')}>
+            <Bug size={13} strokeWidth={1.6} /> bugs
+          </button>
           <button className={`tab ${activeTab === 'behaviour' ? 'active' : ''}`} onClick={() => setActiveTab('behaviour')}>
             <Footprints size={13} strokeWidth={1.6} /> behaviour
           </button>
@@ -1903,6 +1927,8 @@ export default function App() {
             setFilters(prev => ({ ...prev, fingerprint: fp }));
             setActiveTab('logs');
           }} />
+        ) : activeTab === 'bugs' ? (
+          <BugsTab onSelectBug={setOpenBugId} />
         ) : activeTab === 'behaviour' ? (
           <BehaviourTab />
         ) : (
@@ -1921,6 +1947,14 @@ export default function App() {
             }}
           />
         )}
+        {openBugId && (
+          <BugDetailModal
+            bugId={openBugId}
+            onClose={() => setOpenBugId(null)}
+            onOpenSession={(sid) => { setOpenBugId(null); setOpenSessionId(sid); }}
+          />
+        )}
+        {showTokens && <ApiTokensModal onClose={() => setShowTokens(false)} />}
         {openSessionId && (
           <SessionTimelineModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
         )}
@@ -2002,6 +2036,9 @@ export default function App() {
           </div>
           <div className="user-menu">
             <span className="user-name">{user?.username}</span>
+            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => setShowTokens(true)}>
+              <Key size={12} strokeWidth={1.8} /> tokens
+            </button>
             <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={logout}>
               <LogOut size={12} strokeWidth={1.8} /> logout
             </button>
@@ -2024,6 +2061,9 @@ export default function App() {
         <button className={`tab ${activeTab === 'errors' ? 'active' : ''}`} onClick={() => setActiveTab('errors')}>
           <AlertTriangle size={14} strokeWidth={1.6} /> errors
         </button>
+        <button className={`tab ${activeTab === 'bugs' ? 'active' : ''}`} onClick={() => setActiveTab('bugs')}>
+          <Bug size={14} strokeWidth={1.6} /> bugs
+        </button>
         <button className={`tab ${activeTab === 'behaviour' ? 'active' : ''}`} onClick={() => setActiveTab('behaviour')}>
           <Footprints size={14} strokeWidth={1.6} /> behaviour
         </button>
@@ -2043,6 +2083,19 @@ export default function App() {
               onLoad={(f) => { setFilters(f); setSearchInput(f.search ?? ''); }}
             />
           </div>
+          {triage && (triage.untriaged_bug_reports > 0 || triage.regressed_errors.length > 0) && (
+            <div
+              onClick={() => setActiveTab('errors')}
+              style={{
+                padding: '8px 12px', marginBottom: 12, borderRadius: 6,
+                background: 'var(--accent-muted)', border: '1px solid rgba(122,215,232,0.3)',
+                fontFamily: 'var(--font-mono)', fontSize: 12, cursor: 'pointer',
+              }}
+              title="Click to open Errors tab"
+            >
+              <span className="dot-led" /> {triage.summary_for_humans}
+            </div>
+          )}
           <div className="filters-container">
             <div className="filters-row-1">
               <div className="search-wrap">
@@ -2227,6 +2280,8 @@ export default function App() {
           setFilters(prev => ({ ...prev, fingerprint: fp }));
           setActiveTab('logs');
         }} />
+      ) : activeTab === 'bugs' ? (
+        <BugsTab onSelectBug={setOpenBugId} />
       ) : activeTab === 'behaviour' ? (
         <BehaviourTab />
       ) : (
@@ -2245,6 +2300,14 @@ export default function App() {
           }}
         />
       )}
+      {openBugId && (
+        <BugDetailModal
+          bugId={openBugId}
+          onClose={() => setOpenBugId(null)}
+          onOpenSession={(sid) => { setOpenBugId(null); setOpenSessionId(sid); }}
+        />
+      )}
+      {showTokens && <ApiTokensModal onClose={() => setShowTokens(false)} />}
       {openSessionId && (
         <SessionTimelineModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
       )}
