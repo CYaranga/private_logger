@@ -8,6 +8,8 @@ import { executeReplay } from './replay/handler';
 import { redactPii, redactValue } from './redact';
 import { computeFingerprint } from './fingerprint';
 import { snapshotRelatedLogIds, fetchLogsByIds } from './bugs';
+import { buildHumanSummary } from './triage';
+import { OPENAPI_SPEC } from './openapi';
 
 type Bindings = {
   DB: D1Database;
@@ -323,6 +325,8 @@ app.use('/*', cors({
 app.get('/', (c) => {
   return c.json({ status: 'ok', service: 'private-logger-api', version: '2.0.0' });
 });
+
+app.get('/openapi.json', (c) => c.json(OPENAPI_SPEC));
 
 // Auth endpoints (no authentication required)
 app.post('/auth/login', async (c) => {
@@ -1304,6 +1308,80 @@ app.patch('/errors/groups/:fingerprint/state', authMiddleware, async (c) => {
   }
 });
 
+app.get('/agent/triage-summary', authMiddleware, async (c) => {
+  try {
+    const sinceParam = c.req.query('since');
+    const since = sinceParam || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const exclude = `category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
+
+    const openGroups = await c.env.DB.prepare(
+      `SELECT l.fingerprint, COUNT(*) AS occurrences,
+              COUNT(DISTINCT l.user_id) AS affected_users,
+              MAX(l.endpoint) AS endpoint, MAX(l.level) AS level,
+              MAX(l.message) AS sample_message, MIN(l.created_at) AS first_seen,
+              MAX(l.created_at) AS last_seen
+       FROM logs l
+       LEFT JOIN error_group_states s ON s.fingerprint = l.fingerprint
+       WHERE l.level IN ('error','warn') AND l.fingerprint IS NOT NULL
+         AND ${exclude} AND l.created_at >= ?
+       GROUP BY l.fingerprint
+       HAVING COALESCE(s.status, 'open') = 'open'
+       ORDER BY occurrences DESC LIMIT 10`
+    ).bind(since).all();
+
+    const regressed = ((openGroups.results ?? []) as Array<{ first_seen: string }>)
+      .filter((g) => g.first_seen >= since);
+
+    const affectedUsersRow = await c.env.DB.prepare(
+      `SELECT COUNT(DISTINCT user_id) AS n FROM logs
+       WHERE level = 'error' AND ${exclude} AND created_at >= ?`
+    ).bind(since).first<{ n: number }>();
+
+    const topEndpointRow = await c.env.DB.prepare(
+      `SELECT endpoint, COUNT(*) AS n FROM logs
+       WHERE level = 'error' AND endpoint IS NOT NULL AND ${exclude} AND created_at >= ?
+       GROUP BY endpoint ORDER BY n DESC LIMIT 1`
+    ).bind(since).first<{ endpoint: string; n: number }>();
+
+    const activeAppVersions = await c.env.DB.prepare(
+      `SELECT app_version, COUNT(DISTINCT user_id) AS users,
+              SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS errors
+       FROM logs WHERE app_version IS NOT NULL AND ${exclude} AND created_at >= ?
+       GROUP BY app_version ORDER BY users DESC LIMIT 5`
+    ).bind(since).all<{ app_version: string; users: number; errors: number }>();
+
+    const topAppVersion = activeAppVersions.results?.[0]?.app_version ?? null;
+
+    const untriagedRow = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM bug_reports WHERE status = 'new'`
+    ).first<{ n: number }>();
+
+    const summary = buildHumanSummary({
+      open_groups: openGroups.results?.length ?? 0,
+      affected_users: affectedUsersRow?.n ?? 0,
+      regressed: regressed.length,
+      untriaged_bugs: untriagedRow?.n ?? 0,
+      top_endpoint: topEndpointRow?.endpoint ?? null,
+      top_app_version: topAppVersion,
+    });
+
+    return c.json({
+      since,
+      open_error_groups: openGroups.results ?? [],
+      regressed_errors: regressed,
+      affected_users_24h: affectedUsersRow?.n ?? 0,
+      top_endpoints_by_error_rate: topEndpointRow ? [{ endpoint: topEndpointRow.endpoint, count: topEndpointRow.n }] : [],
+      active_app_versions: activeAppVersions.results ?? [],
+      untriaged_bug_reports: untriagedRow?.n ?? 0,
+      summary_for_humans: summary,
+    });
+  } catch (error) {
+    console.error('Error building triage summary:', error);
+    return c.json({ error: 'Failed to build summary' }, 500);
+  }
+});
+
 // Rich user list. Returns one row per user_id with last activity, device,
 // app version, and error count — designed for the "Users" tab in the UI.
 app.get('/users/rich', async (c) => {
@@ -1974,6 +2052,39 @@ async function scheduled(
   }
 
 }
+
+// Cross-system trace correlation. Joins logs + behaviour_events: first
+// finds all logs sharing this trace_id, then pulls behaviour events whose
+// session_id intersects (behaviour_events doesn't carry trace_id directly
+// in the current schema).
+app.get('/trace/:trace_id', authMiddleware, async (c) => {
+  try {
+    const traceId = c.req.param('trace_id');
+    const logsRes = await c.env.DB.prepare(
+      'SELECT * FROM logs WHERE trace_id = ? ORDER BY created_at ASC'
+    ).bind(traceId).all<Log>();
+    const sessionIds = Array.from(new Set(
+      (logsRes.results ?? []).map((l) => l.session_id).filter((s): s is string => !!s)
+    ));
+    let behaviourEvents: Record<string, unknown>[] = [];
+    if (sessionIds.length > 0) {
+      const placeholders = sessionIds.map(() => '?').join(',');
+      const eventsRes = await c.env.ANALYTICS_DB.prepare(
+        `SELECT * FROM behaviour_events WHERE session_id IN (${placeholders})
+         ORDER BY created_at ASC`
+      ).bind(...sessionIds).all();
+      behaviourEvents = eventsRes.results ?? [];
+    }
+    return c.json({
+      trace_id: traceId,
+      logs: (logsRes.results ?? []).map(parseLogFields),
+      behaviour_events: behaviourEvents,
+    });
+  } catch (error) {
+    console.error('Error fetching trace:', error);
+    return c.json({ error: 'Failed to fetch trace' }, 500);
+  }
+});
 
 app.post('/admin/reprocess', async (c) => {
   try {
