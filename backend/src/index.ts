@@ -2078,6 +2078,94 @@ app.put('/bugs/:id/screenshot', async (c) => {
   }
 });
 
+// Authenticated read of stored screenshot. Worker-proxied so we don't
+// expose the R2 bucket publicly.
+app.get('/bugs/:id/screenshot', authMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const row = await c.env.DB.prepare('SELECT screenshot_url FROM bug_reports WHERE id = ?')
+    .bind(id).first<{ screenshot_url: string | null }>();
+  if (!row?.screenshot_url) return c.json({ error: 'no screenshot' }, 404);
+  const obj = await c.env.SCREENSHOTS.get(row.screenshot_url);
+  if (!obj) return c.json({ error: 'object missing' }, 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('cache-control', 'private, max-age=300');
+  return new Response(obj.body, { headers });
+});
+
+app.get('/bugs', authMiddleware, async (c) => {
+  try {
+    const status = c.req.query('status');
+    const userId = c.req.query('user_id');
+    const limit = parseInt(c.req.query('limit') || '100', 10);
+    const offset = parseInt(c.req.query('offset') || '0', 10);
+
+    let where = 'WHERE 1=1';
+    const params: (string | number)[] = [];
+    if (status) { where += ' AND status = ?'; params.push(status); }
+    if (userId) { where += ' AND user_id = ?'; params.push(userId); }
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM bug_reports ${where}
+       ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+
+    const bugs = (results ?? []).map((r) => ({
+      ...r,
+      breadcrumbs: r.breadcrumbs ? JSON.parse(r.breadcrumbs as string) : null,
+      related_log_ids: r.related_log_ids ? JSON.parse(r.related_log_ids as string) : [],
+      screenshot_url: r.screenshot_url ? `/bugs/${r.id}/screenshot` : null,
+    }));
+    return c.json({ bugs, limit, offset });
+  } catch (error) {
+    console.error('Error listing bugs:', error);
+    return c.json({ error: 'Failed to list bugs' }, 500);
+  }
+});
+
+app.get('/bugs/:id', authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    const row = await c.env.DB.prepare('SELECT * FROM bug_reports WHERE id = ?')
+      .bind(id).first<Record<string, unknown>>();
+    if (!row) return c.json({ error: 'not found' }, 404);
+    const ids = row.related_log_ids ? JSON.parse(row.related_log_ids as string) : [];
+    const relatedLogs = await fetchLogsByIds(c.env.DB, ids as number[]);
+    return c.json({
+      ...row,
+      breadcrumbs: row.breadcrumbs ? JSON.parse(row.breadcrumbs as string) : null,
+      related_log_ids: ids,
+      related_logs: relatedLogs,
+      screenshot_url: row.screenshot_url ? `/bugs/${id}/screenshot` : null,
+    });
+  } catch (error) {
+    console.error('Error fetching bug:', error);
+    return c.json({ error: 'Failed to fetch bug' }, 500);
+  }
+});
+
+app.patch('/bugs/:id', authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    const body = await c.req.json<{
+      status?: 'new' | 'triaged' | 'in_progress' | 'resolved' | 'wontfix';
+      assigned_to?: string | null;
+      note?: string | null;
+    }>();
+    await c.env.DB.prepare(
+      `UPDATE bug_reports SET
+         status = COALESCE(?, status),
+         assigned_to = COALESCE(?, assigned_to),
+         note = COALESCE(?, note),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).bind(body.status ?? null, body.assigned_to ?? null, body.note ?? null, id).run();
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Error updating bug:', error);
+    return c.json({ error: 'Failed to update bug' }, 500);
+  }
+});
+
 // ============================================================
 // Endpoint Replay
 // ============================================================
