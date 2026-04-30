@@ -2,6 +2,7 @@ import { Hono, type Context, type Next } from 'hono';
 import { cors } from 'hono/cors';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { validateReplayUrl } from './replay/ssrf';
+import { hashToken } from './tokens';
 import { sanitizeHeadersForStorage } from './replay/sanitize';
 import { executeReplay } from './replay/handler';
 import { redactPii, redactValue } from './redact';
@@ -423,19 +424,43 @@ app.get('/auth/verify', async (c) => {
 
 // Auth middleware for protected routes
 const authMiddleware = async (c: Context<{ Bindings: Bindings }>, next: Next) => {
-  const sessionToken = getCookie(c, 'session') || c.req.header('Authorization')?.replace('Bearer ', '');
-
-  if (!sessionToken) {
-    return c.json({ error: 'Authentication required' }, 401);
+  // 1) API token via Authorization: Bearer pl_live_<32>
+  const authHeader = c.req.header('Authorization');
+  if (authHeader?.startsWith('Bearer pl_live_')) {
+    const plaintext = authHeader.slice('Bearer '.length).trim();
+    const hash = await hashToken(plaintext);
+    const tokenRow = await c.env.DB.prepare(
+      `SELECT t.id AS token_id, t.expires_at, u.id, u.username, u.password_hash, u.created_at
+       FROM api_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.hash = ? LIMIT 1`
+    ).bind(hash).first<{
+      token_id: number; expires_at: string | null;
+      id: number; username: string; password_hash: string; created_at: string;
+    }>();
+    if (tokenRow) {
+      if (tokenRow.expires_at && new Date(tokenRow.expires_at).getTime() < Date.now()) {
+        return c.json({ error: 'Token expired' }, 401);
+      }
+      // Fire-and-forget last_used update
+      c.env.DB.prepare('UPDATE api_tokens SET last_used = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(tokenRow.token_id).run().catch(() => {});
+      c.set('user' as never, {
+        id: tokenRow.id,
+        username: tokenRow.username,
+        password_hash: tokenRow.password_hash,
+        created_at: tokenRow.created_at,
+      } as never);
+      await next();
+      return;
+    }
+    return c.json({ error: 'Invalid token' }, 401);
   }
 
+  // 2) Session cookie or legacy Authorization: Bearer <session-id>
+  const sessionToken = getCookie(c, 'session') || authHeader?.replace('Bearer ', '');
+  if (!sessionToken) return c.json({ error: 'Authentication required' }, 401);
   const user = await validateSession(c.env.DB, sessionToken);
-
-  if (!user) {
-    return c.json({ error: 'Invalid or expired session' }, 401);
-  }
-
-  // Store user in context for later use
+  if (!user) return c.json({ error: 'Invalid or expired session' }, 401);
   c.set('user' as never, user as never);
   await next();
 };
