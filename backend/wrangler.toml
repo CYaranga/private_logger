@@ -16,3 +16,7 @@ database_id = "9d840898-837c-4667-ae32-12f348a7f713"
 # Run archiving daily at 3:00 AM UTC
 [triggers]
 crons = ["0 3 * * *"]
+
+[[r2_buckets]]
+binding = "SCREENSHOTS"
+bucket_name = "private-logger-bug-screenshots"

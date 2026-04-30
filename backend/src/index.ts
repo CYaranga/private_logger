@@ -10,6 +10,7 @@ import { computeFingerprint } from './fingerprint';
 type Bindings = {
   DB: D1Database;
   ANALYTICS_DB: D1Database;
+  SCREENSHOTS: R2Bucket;
 };
 
 type User = {
