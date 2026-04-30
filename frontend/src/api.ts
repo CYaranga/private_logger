@@ -1,4 +1,4 @@
-import type { LogsResponse, Stats, Filters, Storage, Archive, TimeRange, TimeseriesResponse, LogReplay, CreateReplayInput } from './types';
+import type { LogsResponse, Stats, Filters, Storage, Archive, TimeRange, TimeseriesResponse, LogReplay, CreateReplayInput, UserSummary, UserProfile, SessionTimeline, ErrorGroup, ErrorGroupStatus, BehaviourAction, BehaviourByVersion } from './types';
 
 const API_BASE = 'https://private-logger-api.christian-yaranga-05.workers.dev';
 
@@ -35,6 +35,11 @@ export async function fetchLogs(
   if (filters.level) params.append('level', filters.level);
   if (filters.category) params.append('category', filters.category);
   if (filters.http_method) params.append('http_method', filters.http_method);
+  if (filters.session_id) params.append('session_id', filters.session_id);
+  if (filters.fingerprint) params.append('fingerprint', filters.fingerprint);
+  if (filters.app_version) params.append('app_version', filters.app_version);
+  if (filters.start_date) params.append('start_date', filters.start_date);
+  if (filters.end_date) params.append('end_date', filters.end_date);
   params.append('limit', limit.toString());
   params.append('offset', offset.toString());
 
@@ -182,4 +187,100 @@ export async function deleteReplay(replayId: number): Promise<void> {
     method: 'DELETE',
   }));
   if (!response.ok) throw new Error('Failed to delete replay');
+}
+
+export function getStreamUrl(): string {
+  return `${API_BASE}/logs/stream`;
+}
+
+export interface RichUsersResponse {
+  users: UserSummary[];
+  since: string;
+  limit: number;
+  offset: number;
+}
+
+export async function fetchRichUsers(opts: {
+  limit?: number; offset?: number; search?: string; since?: string;
+} = {}): Promise<RichUsersResponse> {
+  const params = new URLSearchParams();
+  if (opts.limit) params.append('limit', String(opts.limit));
+  if (opts.offset) params.append('offset', String(opts.offset));
+  if (opts.search) params.append('search', opts.search);
+  if (opts.since) params.append('since', opts.since);
+  const response = await fetch(`${API_BASE}/users/rich?${params}`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch users');
+  return response.json();
+}
+
+export async function fetchUserProfile(userId: string): Promise<UserProfile> {
+  const response = await fetch(`${API_BASE}/users/${encodeURIComponent(userId)}/profile`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch user profile');
+  return response.json();
+}
+
+export async function fetchSessionTimeline(sessionId: string): Promise<SessionTimeline> {
+  const response = await fetch(`${API_BASE}/sessions/${encodeURIComponent(sessionId)}/timeline`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch session timeline');
+  return response.json();
+}
+
+export interface ErrorGroupsResponse {
+  groups: ErrorGroup[];
+  since: string;
+  limit: number;
+  offset: number;
+}
+
+export async function fetchErrorGroups(opts: {
+  limit?: number; offset?: number; environment?: string; source?: string; since?: string;
+  status?: ErrorGroupStatus | 'all';
+} = {}): Promise<ErrorGroupsResponse> {
+  const params = new URLSearchParams();
+  if (opts.limit) params.append('limit', String(opts.limit));
+  if (opts.offset) params.append('offset', String(opts.offset));
+  if (opts.environment) params.append('environment', opts.environment);
+  if (opts.source) params.append('source', opts.source);
+  if (opts.since) params.append('since', opts.since);
+  if (opts.status) params.append('status', opts.status);
+  const response = await fetch(`${API_BASE}/errors/groups?${params}`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch error groups');
+  return response.json();
+}
+
+export async function fetchBehaviourTopActions(opts: {
+  limit?: number; since?: string; environment?: string; source?: string;
+} = {}): Promise<{ actions: BehaviourAction[]; since: string }> {
+  const params = new URLSearchParams();
+  if (opts.limit) params.append('limit', String(opts.limit));
+  if (opts.since) params.append('since', opts.since);
+  if (opts.environment) params.append('environment', opts.environment);
+  if (opts.source) params.append('source', opts.source);
+  const response = await fetch(`${API_BASE}/behaviour/top-actions?${params}`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch behaviour top actions');
+  return response.json();
+}
+
+export async function fetchBehaviourByVersion(opts: {
+  action?: string; subject?: string; since?: string;
+} = {}): Promise<{ rows: BehaviourByVersion[]; since: string }> {
+  const params = new URLSearchParams();
+  if (opts.action) params.append('action', opts.action);
+  if (opts.subject) params.append('subject', opts.subject);
+  if (opts.since) params.append('since', opts.since);
+  const response = await fetch(`${API_BASE}/behaviour/by-version?${params}`, getFetchOptions());
+  if (!response.ok) throw new Error('Failed to fetch behaviour by version');
+  return response.json();
+}
+
+export async function updateErrorGroupState(
+  fingerprint: string,
+  patch: { status?: ErrorGroupStatus; assigned_to?: string | null; note?: string | null },
+): Promise<void> {
+  const response = await fetch(`${API_BASE}/errors/groups/${encodeURIComponent(fingerprint)}/state`, getFetchOptions({
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  }));
+  if (!response.ok) throw new Error('Failed to update error group state');
 }

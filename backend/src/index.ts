@@ -4,6 +4,8 @@ import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { validateReplayUrl } from './replay/ssrf';
 import { sanitizeHeadersForStorage } from './replay/sanitize';
 import { executeReplay } from './replay/handler';
+import { redactPii, redactValue } from './redact';
+import { computeFingerprint } from './fingerprint';
 
 type Bindings = {
   DB: D1Database;
@@ -140,6 +142,14 @@ type Log = {
   response_data: string | null;
   status_code: number | null;
   duration_ms: number | null;
+  session_id: string | null;
+  trace_id: string | null;
+  app_version: string | null;
+  os_version: string | null;
+  device_model: string | null;
+  network_type: string | null;
+  fingerprint: string | null;
+  breadcrumbs: string | null;
 };
 
 type Archive = {
@@ -172,6 +182,30 @@ type CreateLogInput = {
   response_data?: Record<string, unknown> | string;
   status_code?: number;
   duration_ms?: number;
+  /** Per-app-launch session identifier (UUID/ULID). Groups every log from one session. */
+  session_id?: string;
+  /** Optional cross-system correlation ID (e.g. mobile → backend). */
+  trace_id?: string;
+  /** Client app semver, e.g. "2.4.1". */
+  app_version?: string;
+  /** OS string, e.g. "iOS 17.5". */
+  os_version?: string;
+  /** Device marketing name, e.g. "iPhone 15 Pro". */
+  device_model?: string;
+  /** Network type: "wifi" | "cellular" | "none" | "unknown". */
+  network_type?: string;
+  /**
+   * Optional pre-computed fingerprint. Server falls back to deriving one
+   * from (level, category, endpoint, status_code, normalized message)
+   * when omitted, so error grouping works for legacy clients too.
+   */
+  fingerprint?: string;
+  /**
+   * Last N user-visible actions before this event (newest last).
+   * Each item: { ts: ISO string, type: string, label: string, data?: any }.
+   * Cap recommended at 50 client-side; server stores as-is.
+   */
+  breadcrumbs?: Array<Record<string, unknown>>;
 };
 
 // Free tier limits
@@ -197,7 +231,10 @@ async function processBehaviourLog(
   analyticsDb: D1Database,
   log: { user_id: string; device_id: string | null; message: string;
          metadata: string | null; environment: string; source: string | null;
-         created_at: string }
+         created_at: string;
+         session_id?: string | null; app_version?: string | null;
+         os_version?: string | null; device_model?: string | null;
+         network_type?: string | null }
 ): Promise<void> {
   const parts = log.message.split(':');
   const action = parts[0] ?? 'unknown';
@@ -209,13 +246,20 @@ async function processBehaviourLog(
   // have the original top-level `app` field — only log.source. resolveSource
   // still falls back to metadata.platform / metadata.os for legacy rows.
   const source = log.source ?? resolveSource(null, parsed);
+  const session_id = log.session_id ?? null;
+  const app_version = log.app_version ?? (parsed.app_version as string | undefined) ?? null;
+  const os_version = log.os_version ?? (parsed.os_version as string | undefined) ?? null;
+  const device_model = log.device_model ?? (parsed.device_model as string | undefined) ?? null;
+  const network_type = log.network_type ?? (parsed.network_type as string | undefined) ?? null;
 
   await analyticsDb.prepare(
     `INSERT INTO behaviour_events
-       (user_id, device_id, action, subject, screen, metadata, environment, source, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (user_id, device_id, action, subject, screen, metadata, environment, source, created_at,
+        session_id, app_version, os_version, device_model, network_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).bind(log.user_id, log.device_id, action, subject, screen,
-         log.metadata, log.environment, source, log.created_at).run();
+         log.metadata, log.environment, source, log.created_at,
+         session_id, app_version, os_version, device_model, network_type).run();
 
   await analyticsDb.prepare(
     `INSERT INTO daily_aggregates (date, action, subject, environment, source, count, unique_users)
@@ -241,6 +285,17 @@ async function processBehaviourLog(
      WHERE date = ? AND action = ? AND subject = ? AND environment = ?
        AND (source IS ? OR (source IS NULL AND ? IS NULL))`
   ).bind(row?.cnt ?? 0, date, action, subject, log.environment, source, source).run();
+
+  // Per-version slice. Lets non-technical team members compare how a given
+  // (action, subject) performs across app builds — funnel regressions show
+  // up as a sudden drop on a specific app_version.
+  await analyticsDb.prepare(
+    `INSERT INTO daily_aggregates_by_version
+       (date, action, subject, environment, source, app_version, count, unique_users)
+     VALUES (?, ?, ?, ?, ?, ?, 1, 0)
+     ON CONFLICT(date, action, subject, environment, source, app_version)
+     DO UPDATE SET count = count + 1`
+  ).bind(date, action, subject, log.environment, source, app_version).run();
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -396,6 +451,17 @@ app.post('/logs', async (c) => {
       return c.json({ error: 'user_id and message are required' }, 400);
     }
 
+    // PII scrub on the way in. user_id stays as-is (caller-controlled
+    // identifier, not a credential). message + metadata + payloads are
+    // redacted in place so the stored row carries no live secrets.
+    body.message = redactPii(body.message);
+    if (body.metadata) body.metadata = redactValue(body.metadata) as Record<string, unknown>;
+    if (typeof body.request_data === 'string') body.request_data = redactPii(body.request_data);
+    else if (body.request_data) body.request_data = redactValue(body.request_data) as Record<string, unknown>;
+    if (typeof body.response_data === 'string') body.response_data = redactPii(body.response_data);
+    else if (body.response_data) body.response_data = redactValue(body.response_data) as Record<string, unknown>;
+    if (body.breadcrumbs) body.breadcrumbs = redactValue(body.breadcrumbs) as Array<Record<string, unknown>>;
+
     const metadata = body.metadata ? JSON.stringify(body.metadata) : null;
     const environment = body.environment || 'dev';
     // Resolve source from body.source → body.app → metadata.platform → metadata.os → null.
@@ -416,12 +482,31 @@ app.post('/logs', async (c) => {
       : null;
     const status_code = body.status_code ?? null;
     const duration_ms = body.duration_ms ?? null;
+    const session_id = body.session_id ?? null;
+    const trace_id = body.trace_id ?? null;
+    const app_version = body.app_version ?? null;
+    const os_version = body.os_version ?? null;
+    const device_model = body.device_model ?? null;
+    const network_type = body.network_type ?? null;
+    const breadcrumbs = body.breadcrumbs ? JSON.stringify(body.breadcrumbs) : null;
+    const fingerprint = body.fingerprint
+      ?? await computeFingerprint({ level, category, endpoint, status_code, message: body.message });
 
     const result = await c.env.DB.prepare(
-      `INSERT INTO logs (user_id, device_id, message, metadata, environment, source, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
+      `INSERT INTO logs (
+         user_id, device_id, message, metadata, environment, source, level, category,
+         http_method, endpoint, request_data, response_data, status_code, duration_ms,
+         session_id, trace_id, app_version, os_version, device_model, network_type,
+         fingerprint, breadcrumbs
+       )
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING *`
     )
-      .bind(body.user_id, device_id, body.message, metadata, environment, source, level, category, http_method, endpoint, request_data, response_data, status_code, duration_ms)
+      .bind(
+        body.user_id, device_id, body.message, metadata, environment, source, level, category,
+        http_method, endpoint, request_data, response_data, status_code, duration_ms,
+        session_id, trace_id, app_version, os_version, device_model, network_type,
+        fingerprint, breadcrumbs,
+      )
       .first<Log>();
 
     // Process behaviour logs into analytics D1
@@ -435,6 +520,11 @@ app.post('/logs', async (c) => {
           environment: environment,
           source: source,
           created_at: result.created_at,
+          session_id,
+          app_version,
+          os_version,
+          device_model,
+          network_type,
         });
         // Delete from raw logs to free space
         await c.env.DB.prepare('DELETE FROM logs WHERE id = ?')
@@ -458,6 +548,7 @@ function parseLogFields(log: Log): Record<string, unknown> {
     metadata: log.metadata ? JSON.parse(log.metadata) : null,
     request_data: log.request_data ? tryParseJSON(log.request_data) : null,
     response_data: log.response_data ? tryParseJSON(log.response_data) : null,
+    breadcrumbs: log.breadcrumbs ? tryParseJSON(log.breadcrumbs) : null,
   };
 }
 
@@ -508,6 +599,11 @@ app.get('/logs', async (c) => {
     const level = c.req.query('level');
     const category = c.req.query('category');
     const http_method = c.req.query('http_method');
+    const session_id = c.req.query('session_id');
+    const fingerprint = c.req.query('fingerprint');
+    const app_version = c.req.query('app_version');
+    const start_date = c.req.query('start_date');
+    const end_date = c.req.query('end_date');
 
     let query = 'SELECT * FROM logs WHERE 1=1';
     const params: (string | number)[] = [];
@@ -540,11 +636,40 @@ app.get('/logs', async (c) => {
     if (category) {
       query += ' AND category = ?';
       params.push(category);
+    } else {
+      // Behaviour logs (USER_ACTION) belong to the analytics project; hide
+      // them from the dashboard unless the caller asks for them explicitly.
+      query += ` AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
     }
 
     if (http_method) {
       query += ' AND http_method = ?';
       params.push(http_method);
+    }
+
+    if (session_id) {
+      query += ' AND session_id = ?';
+      params.push(session_id);
+    }
+
+    if (fingerprint) {
+      query += ' AND fingerprint = ?';
+      params.push(fingerprint);
+    }
+
+    if (app_version) {
+      query += ' AND app_version = ?';
+      params.push(app_version);
+    }
+
+    if (start_date) {
+      query += ' AND created_at >= ?';
+      params.push(start_date);
+    }
+
+    if (end_date) {
+      query += ' AND created_at <= ?';
+      params.push(end_date);
     }
 
     if (search) {
@@ -591,11 +716,38 @@ app.get('/logs', async (c) => {
     if (category) {
       countQuery += ' AND category = ?';
       countParams.push(category);
+    } else {
+      countQuery += ` AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
     }
 
     if (http_method) {
       countQuery += ' AND http_method = ?';
       countParams.push(http_method);
+    }
+
+    if (session_id) {
+      countQuery += ' AND session_id = ?';
+      countParams.push(session_id);
+    }
+
+    if (fingerprint) {
+      countQuery += ' AND fingerprint = ?';
+      countParams.push(fingerprint);
+    }
+
+    if (app_version) {
+      countQuery += ' AND app_version = ?';
+      countParams.push(app_version);
+    }
+
+    if (start_date) {
+      countQuery += ' AND created_at >= ?';
+      countParams.push(start_date);
+    }
+
+    if (end_date) {
+      countQuery += ' AND created_at <= ?';
+      countParams.push(end_date);
     }
 
     if (search) {
@@ -774,7 +926,7 @@ app.get('/logs/recent', async (c) => {
       return c.json({ error: 'hours must be between 1 and 720 (30 days)' }, 400);
     }
 
-    let query = `SELECT * FROM logs WHERE created_at >= datetime('now', '-${hours} hours')`;
+    let query = `SELECT * FROM logs WHERE created_at >= datetime('now', '-${hours} hours') AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
     const params: string[] = [];
 
     if (deviceId) {
@@ -824,7 +976,7 @@ app.get('/users', async (c) => {
 app.get('/categories', async (c) => {
   try {
     const { results } = await c.env.DB.prepare(
-      'SELECT DISTINCT category FROM logs WHERE category IS NOT NULL ORDER BY category'
+      `SELECT DISTINCT category FROM logs WHERE category IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%') ORDER BY category`
     ).all<{ category: string }>();
 
     return c.json({ categories: results?.map(r => r.category) || [] });
@@ -862,34 +1014,434 @@ app.get('/sources', async (c) => {
   }
 });
 
+// User profile aggregator. Returns a human-readable summary so non-technical
+// team members can answer "who is this user, what device, when last active,
+// how often do they hit errors" in one request.
+app.get('/users/:id/profile', async (c) => {
+  try {
+    const userId = c.req.param('id');
+
+    const summary = await c.env.DB.prepare(
+      `SELECT
+         COUNT(*) AS total_logs,
+         SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS error_count,
+         SUM(CASE WHEN level = 'warn' THEN 1 ELSE 0 END) AS warn_count,
+         MIN(created_at) AS first_seen,
+         MAX(created_at) AS last_seen,
+         COUNT(DISTINCT session_id) AS session_count,
+         COUNT(DISTINCT device_id) AS device_count
+       FROM logs WHERE user_id = ?`
+    ).bind(userId).first<{
+      total_logs: number; error_count: number; warn_count: number;
+      first_seen: string | null; last_seen: string | null;
+      session_count: number; device_count: number;
+    }>();
+
+    if (!summary || summary.total_logs === 0) {
+      return c.json({ error: 'User not found' }, 404);
+    }
+
+    const { results: devices } = await c.env.DB.prepare(
+      `SELECT device_id, device_model, os_version, MAX(created_at) AS last_seen, COUNT(*) AS log_count
+       FROM logs WHERE user_id = ? AND device_id IS NOT NULL
+       GROUP BY device_id ORDER BY last_seen DESC LIMIT 10`
+    ).bind(userId).all();
+
+    const { results: sources } = await c.env.DB.prepare(
+      `SELECT source, COUNT(*) AS count FROM logs
+       WHERE user_id = ? AND source IS NOT NULL
+       GROUP BY source ORDER BY count DESC`
+    ).bind(userId).all();
+
+    const { results: appVersions } = await c.env.DB.prepare(
+      `SELECT app_version, MAX(created_at) AS last_seen, COUNT(*) AS count
+       FROM logs WHERE user_id = ? AND app_version IS NOT NULL
+       GROUP BY app_version ORDER BY last_seen DESC LIMIT 10`
+    ).bind(userId).all();
+
+    const { results: topErrors } = await c.env.DB.prepare(
+      `SELECT fingerprint, MAX(message) AS sample_message, MAX(category) AS category,
+              MAX(endpoint) AS endpoint, MAX(status_code) AS status_code,
+              COUNT(*) AS count, MAX(created_at) AS last_seen
+       FROM logs WHERE user_id = ? AND level = 'error' AND fingerprint IS NOT NULL
+       GROUP BY fingerprint ORDER BY count DESC LIMIT 10`
+    ).bind(userId).all();
+
+    const { results: recentSessions } = await c.env.DB.prepare(
+      `SELECT session_id, MIN(created_at) AS started_at, MAX(created_at) AS ended_at,
+              COUNT(*) AS log_count,
+              SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS error_count
+       FROM logs WHERE user_id = ? AND session_id IS NOT NULL
+       GROUP BY session_id ORDER BY started_at DESC LIMIT 20`
+    ).bind(userId).all();
+
+    return c.json({
+      user_id: userId,
+      summary,
+      devices,
+      sources,
+      app_versions: appVersions,
+      top_errors: topErrors,
+      recent_sessions: recentSessions,
+    });
+  } catch (error) {
+    console.error('Error fetching user profile:', error);
+    return c.json({ error: 'Failed to fetch user profile' }, 500);
+  }
+});
+
+// Session timeline. Ordered list of every log in one app session, with
+// breadcrumbs and context unwrapped, so PMs/QA can replay what happened.
+app.get('/sessions/:id/timeline', async (c) => {
+  try {
+    const sessionId = c.req.param('id');
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM logs WHERE session_id = ? ORDER BY created_at ASC`
+    ).bind(sessionId).all<Log>();
+
+    if (!results || results.length === 0) {
+      return c.json({ error: 'Session not found' }, 404);
+    }
+
+    const first = results[0];
+    const last = results[results.length - 1];
+    const errorCount = results.filter(r => r.level === 'error').length;
+    const warnCount = results.filter(r => r.level === 'warn').length;
+
+    return c.json({
+      session_id: sessionId,
+      user_id: first.user_id,
+      device_id: first.device_id,
+      device_model: first.device_model,
+      os_version: first.os_version,
+      app_version: first.app_version,
+      source: first.source,
+      started_at: first.created_at,
+      ended_at: last.created_at,
+      log_count: results.length,
+      error_count: errorCount,
+      warn_count: warnCount,
+      logs: results.map(parseLogFields),
+    });
+  } catch (error) {
+    console.error('Error fetching session timeline:', error);
+    return c.json({ error: 'Failed to fetch session timeline' }, 500);
+  }
+});
+
+// Error groups. Buckets logs by fingerprint so identical errors collapse
+// into one row with count, affected user count, first/last seen.
+app.get('/errors/groups', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '50');
+    const offset = parseInt(c.req.query('offset') || '0');
+    const environment = c.req.query('environment');
+    const source = c.req.query('source');
+    const status = c.req.query('status'); // 'open' | 'ignored' | 'resolved' | 'monitoring' | 'all'
+    const sinceParam = c.req.query('since'); // ISO timestamp; default last 7d
+
+    const since = sinceParam || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    let where = `WHERE level IN ('error', 'warn') AND fingerprint IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%') AND created_at >= ?`;
+    const params: (string | number)[] = [since];
+    if (environment) { where += ' AND environment = ?'; params.push(environment); }
+    if (source) { where += ' AND source = ?'; params.push(source); }
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT
+         l.fingerprint,
+         MAX(l.level) AS level,
+         MAX(l.category) AS category,
+         MAX(l.endpoint) AS endpoint,
+         MAX(l.status_code) AS status_code,
+         MAX(l.message) AS sample_message,
+         MAX(l.source) AS sample_source,
+         COUNT(*) AS occurrences,
+         COUNT(DISTINCT l.user_id) AS affected_users,
+         MIN(l.created_at) AS first_seen,
+         MAX(l.created_at) AS last_seen,
+         COALESCE(s.status, 'open') AS state_status,
+         s.assigned_to AS state_assigned_to,
+         s.note AS state_note,
+         s.updated_at AS state_updated_at
+       FROM logs l
+       LEFT JOIN error_group_states s ON s.fingerprint = l.fingerprint
+       ${where}
+       GROUP BY l.fingerprint
+       HAVING ${status === 'all' ? '1=1' : `state_status = ?`}
+       ORDER BY occurrences DESC
+       LIMIT ? OFFSET ?`
+    ).bind(
+      ...params,
+      ...(status === 'all' ? [] : [status || 'open']),
+      limit,
+      offset,
+    ).all();
+
+    return c.json({ groups: results || [], since, limit, offset });
+  } catch (error) {
+    console.error('Error fetching error groups:', error);
+    return c.json({ error: 'Failed to fetch error groups' }, 500);
+  }
+});
+
+// Update state of an error group (status / assignment / note).
+// Authenticated — only dashboard operators should be able to triage.
+app.patch('/errors/groups/:fingerprint/state', authMiddleware, async (c) => {
+  try {
+    const fingerprint = c.req.param('fingerprint');
+    const body = await c.req.json<{
+      status?: 'open' | 'ignored' | 'resolved' | 'monitoring';
+      assigned_to?: string | null;
+      note?: string | null;
+    }>();
+    const user = c.get('user' as never) as User | undefined;
+    const updatedBy = user?.username ?? 'unknown';
+
+    await c.env.DB.prepare(
+      `INSERT INTO error_group_states (fingerprint, status, assigned_to, note, updated_at, updated_by)
+       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+       ON CONFLICT(fingerprint) DO UPDATE SET
+         status = COALESCE(?, error_group_states.status),
+         assigned_to = COALESCE(?, error_group_states.assigned_to),
+         note = COALESCE(?, error_group_states.note),
+         updated_at = CURRENT_TIMESTAMP,
+         updated_by = ?`
+    ).bind(
+      fingerprint,
+      body.status ?? 'open',
+      body.assigned_to ?? null,
+      body.note ?? null,
+      updatedBy,
+      body.status ?? null,
+      body.assigned_to ?? null,
+      body.note ?? null,
+      updatedBy,
+    ).run();
+
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Error updating error group state:', error);
+    return c.json({ error: 'Failed to update state' }, 500);
+  }
+});
+
+// Rich user list. Returns one row per user_id with last activity, device,
+// app version, and error count — designed for the "Users" tab in the UI.
+app.get('/users/rich', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '100');
+    const offset = parseInt(c.req.query('offset') || '0');
+    const search = c.req.query('search');
+    const sinceParam = c.req.query('since'); // optional ISO; default 7d
+
+    const since = sinceParam || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    let where = `WHERE created_at >= ? AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
+    const params: (string | number)[] = [since];
+    if (search) { where += ' AND user_id LIKE ?'; params.push(`%${search}%`); }
+
+    const { results } = await c.env.DB.prepare(
+      `SELECT
+         user_id,
+         COUNT(*) AS log_count,
+         SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS error_count,
+         MAX(created_at) AS last_seen,
+         MIN(created_at) AS first_seen,
+         COUNT(DISTINCT session_id) AS session_count,
+         (SELECT device_model FROM logs l2 WHERE l2.user_id = logs.user_id AND device_model IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS last_device_model,
+         (SELECT os_version FROM logs l3 WHERE l3.user_id = logs.user_id AND os_version IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS last_os_version,
+         (SELECT app_version FROM logs l4 WHERE l4.user_id = logs.user_id AND app_version IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS last_app_version,
+         (SELECT source FROM logs l5 WHERE l5.user_id = logs.user_id AND source IS NOT NULL ORDER BY created_at DESC LIMIT 1) AS last_source
+       FROM logs ${where}
+       GROUP BY user_id
+       ORDER BY last_seen DESC
+       LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+
+    return c.json({ users: results || [], since, limit, offset });
+  } catch (error) {
+    console.error('Error fetching rich users:', error);
+    return c.json({ error: 'Failed to fetch users' }, 500);
+  }
+});
+
+// Live tail. Server-Sent Events stream that emits new logs as they arrive.
+// Implementation: hold the connection open, poll D1 every 2s for rows with
+// id > last seen, push them as `data:` events. Workers cap connections at
+// roughly 30s under default plan, so the EventSource on the client will
+// auto-reconnect using Last-Event-ID — the server uses that header (or
+// `?after=` query param fallback) to resume from where the prior stream left.
+app.get('/logs/stream', async (c) => {
+  const lastEventId = c.req.header('Last-Event-ID');
+  const afterParam = c.req.query('after');
+  let lastId = parseInt(lastEventId || afterParam || '0', 10);
+  if (Number.isNaN(lastId) || lastId < 0) lastId = 0;
+
+  // If no starting point given, anchor at the current MAX(id) so the
+  // first stream only delivers genuinely-new entries (not 100k history).
+  if (lastId === 0) {
+    const head = await c.env.DB.prepare('SELECT IFNULL(MAX(id), 0) AS m FROM logs')
+      .first<{ m: number }>();
+    lastId = head?.m ?? 0;
+  }
+
+  const env = c.env;
+  const encoder = new TextEncoder();
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      // Initial comment so the client knows the connection is live.
+      controller.enqueue(encoder.encode(`: connected at ${new Date().toISOString()}\n\n`));
+      const startTs = Date.now();
+
+      const poll = async () => {
+        try {
+          const { results } = await env.DB.prepare(
+            `SELECT * FROM logs
+             WHERE id > ? AND category != 'USER_ACTION'
+               AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%')
+             ORDER BY id ASC LIMIT 100`
+          ).bind(lastId).all<Log>();
+
+          if (results && results.length > 0) {
+            for (const row of results) {
+              lastId = row.id;
+              const data = JSON.stringify(parseLogFields(row));
+              controller.enqueue(encoder.encode(`id: ${row.id}\ndata: ${data}\n\n`));
+            }
+          } else {
+            controller.enqueue(encoder.encode(`: heartbeat ${Date.now()}\n\n`));
+          }
+        } catch (err) {
+          controller.enqueue(encoder.encode(`event: error\ndata: ${JSON.stringify({ error: String(err) })}\n\n`));
+        }
+      };
+
+      // Poll every 2s, terminate cleanly after ~25s so EventSource
+      // reconnects before the Worker hard-cap kicks in.
+      const interval = setInterval(() => {
+        if (Date.now() - startTs > 25_000) {
+          clearInterval(interval);
+          controller.close();
+          return;
+        }
+        poll();
+      }, 2000);
+
+      // First poll right away.
+      poll();
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      'Connection': 'keep-alive',
+      'X-Accel-Buffering': 'no',
+    },
+  });
+});
+
+// Behaviour analytics endpoints — read from ANALYTICS_DB.
+// Surfaces user-action funnels for non-technical teammates: which actions
+// users do most, and how those actions compare across app versions.
+app.get('/behaviour/top-actions', async (c) => {
+  try {
+    const limit = parseInt(c.req.query('limit') || '50');
+    const sinceParam = c.req.query('since'); // optional date YYYY-MM-DD; default 7d
+    const environment = c.req.query('environment');
+    const source = c.req.query('source');
+
+    const since = sinceParam || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    let where = 'WHERE date >= ?';
+    const params: (string | number)[] = [since];
+    if (environment) { where += ' AND environment = ?'; params.push(environment); }
+    if (source) { where += ' AND source = ?'; params.push(source); }
+
+    const { results } = await c.env.ANALYTICS_DB.prepare(
+      `SELECT action, subject,
+              SUM(count) AS total_count,
+              SUM(unique_users) AS total_users,
+              MAX(date) AS last_day,
+              MIN(date) AS first_day
+       FROM daily_aggregates
+       ${where}
+       GROUP BY action, subject
+       ORDER BY total_count DESC
+       LIMIT ?`
+    ).bind(...params, limit).all();
+
+    return c.json({ actions: results || [], since });
+  } catch (error) {
+    console.error('Error fetching top actions:', error);
+    return c.json({ error: 'Failed to fetch top actions' }, 500);
+  }
+});
+
+app.get('/behaviour/by-version', async (c) => {
+  try {
+    const action = c.req.query('action');
+    const subject = c.req.query('subject');
+    const sinceParam = c.req.query('since');
+    const since = sinceParam || new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+    let where = 'WHERE date >= ?';
+    const params: (string | number)[] = [since];
+    if (action) { where += ' AND action = ?'; params.push(action); }
+    if (subject) { where += ' AND subject = ?'; params.push(subject); }
+
+    const { results } = await c.env.ANALYTICS_DB.prepare(
+      `SELECT app_version, action, subject,
+              SUM(count) AS total_count,
+              SUM(unique_users) AS total_users,
+              MAX(date) AS last_day
+       FROM daily_aggregates_by_version
+       ${where}
+       GROUP BY app_version, action, subject
+       ORDER BY app_version DESC, total_count DESC`
+    ).bind(...params).all();
+
+    return c.json({ rows: results || [], since });
+  } catch (error) {
+    console.error('Error fetching behaviour by version:', error);
+    return c.json({ error: 'Failed to fetch behaviour by version' }, 500);
+  }
+});
+
 // Get log statistics including storage info
 app.get('/stats', async (c) => {
   try {
-    const totalLogs = await c.env.DB.prepare('SELECT COUNT(*) as count FROM logs')
-      .first<{ count: number }>();
+    // Stats panels exclude behaviour (USER_ACTION) — those belong to the
+    // user-behaviour analytics surface, not the operational dashboard.
+    const totalLogs = await c.env.DB.prepare(
+      `SELECT COUNT(*) as count FROM logs WHERE category != 'USER_ACTION'`
+    ).first<{ count: number }>();
 
     const byEnvironment = await c.env.DB.prepare(
-      'SELECT environment, COUNT(*) as count FROM logs GROUP BY environment'
+      `SELECT environment, COUNT(*) as count FROM logs WHERE category != 'USER_ACTION' GROUP BY environment`
     ).all<{ environment: string; count: number }>();
 
     const byLevel = await c.env.DB.prepare(
-      'SELECT level, COUNT(*) as count FROM logs GROUP BY level'
+      `SELECT level, COUNT(*) as count FROM logs WHERE category != 'USER_ACTION' GROUP BY level`
     ).all<{ level: string; count: number }>();
 
     const byCategory = await c.env.DB.prepare(
-      'SELECT category, COUNT(*) as count FROM logs GROUP BY category ORDER BY count DESC LIMIT 10'
+      `SELECT category, COUNT(*) as count FROM logs WHERE category != 'USER_ACTION' GROUP BY category ORDER BY count DESC LIMIT 10`
     ).all<{ category: string; count: number }>();
 
     const bySource = await c.env.DB.prepare(
-      'SELECT source, COUNT(*) as count FROM logs WHERE source IS NOT NULL GROUP BY source ORDER BY count DESC'
+      `SELECT source, COUNT(*) as count FROM logs WHERE source IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%') GROUP BY source ORDER BY count DESC`
     ).all<{ source: string; count: number }>();
 
     const uniqueUsers = await c.env.DB.prepare(
-      'SELECT COUNT(DISTINCT user_id) as count FROM logs'
+      `SELECT COUNT(DISTINCT user_id) as count FROM logs WHERE category != 'USER_ACTION'`
     ).first<{ count: number }>();
 
     const recentLogs = await c.env.DB.prepare(
-      "SELECT COUNT(*) as count FROM logs WHERE created_at >= datetime('now', '-24 hours')"
+      `SELECT COUNT(*) as count FROM logs WHERE created_at >= datetime('now', '-24 hours') AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`
     ).first<{ count: number }>();
 
     // Get archive stats
@@ -899,11 +1451,11 @@ app.get('/stats', async (c) => {
 
     // Get API call stats
     const apiCallStats = await c.env.DB.prepare(
-      'SELECT COUNT(*) as count FROM logs WHERE http_method IS NOT NULL'
+      `SELECT COUNT(*) as count FROM logs WHERE http_method IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`
     ).first<{ count: number }>();
 
     const errorCount = await c.env.DB.prepare(
-      "SELECT COUNT(*) as count FROM logs WHERE level = 'error'"
+      `SELECT COUNT(*) as count FROM logs WHERE level = 'error' AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`
     ).first<{ count: number }>();
 
     return c.json({
@@ -967,6 +1519,7 @@ app.get('/stats/timeseries', async (c) => {
         AVG(duration_ms) AS avg_duration_ms
       FROM logs
       WHERE created_at >= datetime('now', '${cutoff}')
+        AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')
       GROUP BY bucket
       ORDER BY bucket ASC
     `).all<{
@@ -996,6 +1549,7 @@ app.get('/stats/timeseries', async (c) => {
         FROM logs
         WHERE created_at >= datetime('now', '${cutoff}')
           AND duration_ms IS NOT NULL
+          AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')
         ORDER BY bucket ASC, duration_ms ASC
       `).all<{ bucket: string; duration_ms: number }>();
 
@@ -1046,6 +1600,7 @@ app.get('/stats/timeseries', async (c) => {
       FROM logs
       WHERE created_at >= datetime('now', '${cutoff}')
         AND level = 'error'
+        AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')
       GROUP BY category
       ORDER BY count DESC
       LIMIT 10
@@ -1065,6 +1620,7 @@ app.get('/stats/timeseries', async (c) => {
       FROM logs
       WHERE created_at >= datetime('now', '${cutoff}')
         AND status_code IS NOT NULL
+        AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')
       GROUP BY status_group
       ORDER BY status_group ASC
     `).all<{ status_group: string; count: number }>();
@@ -1322,6 +1878,11 @@ async function scheduled(
           environment: log.environment,
           source: log.source,
           created_at: log.created_at,
+          session_id: log.session_id,
+          app_version: log.app_version,
+          os_version: log.os_version,
+          device_model: log.device_model,
+          network_type: log.network_type,
         });
         await env.DB.prepare('DELETE FROM logs WHERE id = ?').bind(log.id).run();
         retried++;
@@ -1354,6 +1915,11 @@ app.post('/admin/reprocess', async (c) => {
           environment: log.environment,
           source: log.source,
           created_at: log.created_at,
+          session_id: log.session_id,
+          app_version: log.app_version,
+          os_version: log.os_version,
+          device_model: log.device_model,
+          network_type: log.network_type,
         });
         await c.env.DB.prepare('DELETE FROM logs WHERE id = ?').bind(log.id).run();
         processed++;

@@ -1,6 +1,17 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type CSSProperties } from 'react';
 import type { Log, Stats, Filters, Storage, Archive, LogLevel, HttpMethod } from './types';
 import { ReplayTabs } from './Replay';
+import { UsersTab } from './UsersTab';
+import { ErrorsTab } from './ErrorsTab';
+import { BehaviourTab } from './BehaviourTab';
+import { UserProfileModal } from './UserProfileModal';
+import { SessionTimelineModal } from './SessionTimelineModal';
+import {
+  Activity, Users as UsersIcon, AlertTriangle, Archive as ArchiveIcon, BarChart3,
+  Terminal, RefreshCw, LogOut, Download, Trash2, Inbox, Bookmark, BookmarkPlus, X,
+  Footprints, Radio,
+} from 'lucide-react';
+import { loadViews, saveViews, createView, type SavedView } from './savedViews';
 import {
   fetchLogs,
   fetchStats,
@@ -16,6 +27,7 @@ import {
   deleteArchive,
   getArchiveDownloadUrl,
   getExportAllUrl,
+  getStreamUrl,
   type BulkDeleteParams,
 } from './api';
 import { useAuth } from './AuthContext';
@@ -541,7 +553,7 @@ function ArchivesSection({
       </p>
       {archives.length === 0 ? (
         <div className="empty-state">
-          <div className="empty-state-icon">[ ]</div>
+          <div className="empty-state-icon"><Inbox size={32} strokeWidth={1.4} /></div>
           <div className="empty-state-title">No archives yet</div>
           <div className="empty-state-sub">Archives appear here after logs are older than 7 days</div>
         </div>
@@ -791,6 +803,152 @@ function MobileStatsBar({ stats, storage, expanded, onToggle }: {
   );
 }
 
+/**
+ * Saved views toolbar. Lets users persist a named filter combo to
+ * localStorage (e.g. "iOS errors last 24h") and re-apply it later.
+ */
+function SavedViewsBar({
+  filters, onLoad,
+}: {
+  filters: Filters;
+  onLoad: (f: Filters) => void;
+}) {
+  const [views, setViews] = useState<SavedView[]>(() => loadViews());
+  const [open, setOpen] = useState(false);
+  const persist = (next: SavedView[]) => { saveViews(next); setViews(next); };
+
+  const handleSave = () => {
+    const name = prompt('Name this view:');
+    if (!name?.trim()) return;
+    persist([...views, createView(name, filters)]);
+    setOpen(false);
+  };
+  const handleDelete = (id: string) => persist(views.filter(v => v.id !== id));
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-flex', gap: 6 }}>
+      <button
+        className="btn btn-secondary"
+        style={{ padding: '6px 12px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+        onClick={() => setOpen(p => !p)}
+        title="Saved views"
+      >
+        <Bookmark size={12} strokeWidth={1.8} />
+        Views {views.length > 0 && <span style={{ color: 'var(--text-tertiary)' }}>({views.length})</span>}
+      </button>
+      <button
+        className="btn btn-secondary"
+        style={{ padding: '6px 12px', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 6 }}
+        onClick={handleSave}
+        title="Save current filters as a new view"
+      >
+        <BookmarkPlus size={12} strokeWidth={1.8} />
+        Save
+      </button>
+      {open && (
+        <div
+          style={{
+            position: 'absolute', top: 'calc(100% + 4px)', left: 0,
+            background: 'var(--bg-1)', border: '1px solid var(--border-strong)',
+            borderRadius: 6, padding: 6, minWidth: 280, zIndex: 50,
+            boxShadow: '0 12px 30px -8px rgba(0,0,0,0.5)',
+          }}
+        >
+          {views.length === 0 ? (
+            <div style={{ padding: '10px 12px', fontSize: 12, color: 'var(--text-secondary)' }}>
+              No saved views yet. Set filters and hit <strong>Save</strong>.
+            </div>
+          ) : views.map(v => (
+            <div
+              key={v.id}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 8, padding: '8px 10px',
+                borderRadius: 4, cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--bg-2)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+              onClick={() => { onLoad(v.filters); setOpen(false); }}
+            >
+              <Bookmark size={12} strokeWidth={1.8} style={{ color: 'var(--accent)' }} />
+              <span style={{ flex: 1, fontSize: 12, fontFamily: 'var(--font-mono)' }}>{v.name}</span>
+              <button
+                onClick={(e) => { e.stopPropagation(); handleDelete(v.id); }}
+                style={{
+                  background: 'transparent', border: 'none', color: 'var(--text-tertiary)',
+                  cursor: 'pointer', padding: 4, borderRadius: 3,
+                }}
+                title="Delete view"
+              >
+                <X size={12} strokeWidth={1.8} />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Date range inputs. Uses native datetime-local for friendliness.
+ * Stored value is SQLite-compatible "YYYY-MM-DD HH:MM:SS" in UTC so string
+ * comparison against logs.created_at works reliably.
+ */
+function DateRangeInputs({
+  startValue, endValue, onChangeStart, onChangeEnd, stacked,
+}: {
+  startValue: string;
+  endValue: string;
+  onChangeStart: (v: string) => void;
+  onChangeEnd: (v: string) => void;
+  stacked?: boolean;
+}) {
+  const toLocalInput = (sqliteUtc: string): string => {
+    if (!sqliteUtc) return '';
+    const iso = sqliteUtc.includes('T') ? sqliteUtc : sqliteUtc.replace(' ', 'T') + 'Z';
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    const pad = (n: number) => n.toString().padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  };
+  const fromLocalInput = (local: string): string => {
+    if (!local) return '';
+    const d = new Date(local);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 19).replace('T', ' ');
+  };
+  const wrapStyle: CSSProperties = stacked
+    ? { display: 'contents' }
+    : { display: 'flex', gap: 6, alignItems: 'center' };
+  const groupCls = stacked ? 'filter-group' : '';
+  return (
+    <div style={wrapStyle}>
+      <div className={groupCls}>
+        {stacked && <label>From</label>}
+        <input
+          type="datetime-local"
+          value={toLocalInput(startValue)}
+          onChange={(e) => onChangeStart(fromLocalInput(e.target.value))}
+          placeholder="From"
+          title="From (local time)"
+          style={stacked ? undefined : { padding: '7px 8px', fontSize: 12 }}
+        />
+      </div>
+      <div className={groupCls}>
+        {stacked && <label>To</label>}
+        <input
+          type="datetime-local"
+          value={toLocalInput(endValue)}
+          onChange={(e) => onChangeEnd(fromLocalInput(e.target.value))}
+          placeholder="To"
+          title="To (local time)"
+          style={stacked ? undefined : { padding: '7px 8px', fontSize: 12 }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function MobileFilterSheet({
   filters, onFilterChange, onClear, onClose,
   users, devices, sources, categories,
@@ -870,6 +1028,13 @@ function MobileFilterSheet({
               {devices.map((d) => <option key={d} value={d}>{d}</option>)}
             </select>
           </div>
+          <DateRangeInputs
+            startValue={filters.start_date ?? ''}
+            endValue={filters.end_date ?? ''}
+            onChangeStart={(v) => onFilterChange('start_date', v)}
+            onChangeEnd={(v) => onFilterChange('end_date', v)}
+            stacked
+          />
         </div>
         <div className="filter-sheet-footer">
           <button className="btn btn-secondary" style={{ flex: 1 }} onClick={() => { onClear(); onClose(); }}>Clear All</button>
@@ -1236,7 +1401,9 @@ function AnalyticsDashboard({ isMobile }: { isMobile: boolean }) {
 
 export default function App() {
   const { user, logout } = useAuth();
-  const [activeTab, setActiveTab] = useState<'logs' | 'archives' | 'analytics'>('logs');
+  const [activeTab, setActiveTab] = useState<'logs' | 'users' | 'errors' | 'behaviour' | 'archives' | 'analytics'>('logs');
+  const [openUserId, setOpenUserId] = useState<string | null>(null);
+  const [openSessionId, setOpenSessionId] = useState<string | null>(null);
   const [logs, setLogs] = useState<Log[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [storage, setStorage] = useState<Storage | null>(null);
@@ -1251,6 +1418,8 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
+  const [liveTail, setLiveTail] = useState(false);
+  const [liveCount, setLiveCount] = useState(0);
   const [filters, setFilters] = useState<Filters>({
     user_id: '',
     device_id: '',
@@ -1261,11 +1430,24 @@ export default function App() {
     category: '',
     http_method: '',
   });
+  const [searchInput, setSearchInput] = useState('');
+
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (trimmed === filters.search) return;
+    const t = setTimeout(() => {
+      setFilters(prev => (prev.search === trimmed ? prev : { ...prev, search: trimmed }));
+    }, 300);
+    return () => clearTimeout(t);
+  }, [searchInput, filters.search]);
+
+  const isSearching = searchInput.trim() !== filters.search || (loading && filters.search.length > 0);
   const [lastRefresh, setLastRefresh] = useState(new Date());
   const [userTimezone, setUserTimezone] = useState<string | undefined>(undefined);
   const [columnWidths, setColumnWidths] = useState<Record<ColumnKey, number>>(getStoredColumnWidths);
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
   const [showBulkDelete, setShowBulkDelete] = useState(false);
+  const [exportingCsv, setExportingCsv] = useState(false);
   const [showMoreFilters, setShowMoreFilters] = useState(false);
   const isMobile = useIsMobile();
   const [showFilterSheet, setShowFilterSheet] = useState(false);
@@ -1342,10 +1524,36 @@ export default function App() {
   useEffect(() => { loadData(); }, [loadData]);
 
   useEffect(() => {
-    if (!autoRefresh) return;
+    // Auto-refresh polling pauses while live tail is active — the SSE stream
+    // delivers entries as they land so a 30s reload would be wasted work.
+    if (!autoRefresh || liveTail) return;
     const interval = setInterval(loadData, 30000);
     return () => clearInterval(interval);
-  }, [loadData, autoRefresh]);
+  }, [loadData, autoRefresh, liveTail]);
+
+  useEffect(() => {
+    if (!liveTail) { setLiveCount(0); return; }
+    const url = getStreamUrl();
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (ev) => {
+      try {
+        const log = JSON.parse(ev.data) as Log;
+        setLogs(prev => {
+          if (prev.some(p => p.id === log.id)) return prev;
+          // Prepend, cap at perPage so the table doesn't grow unbounded.
+          return [log, ...prev].slice(0, perPage);
+        });
+        setLiveCount(c => c + 1);
+      } catch {
+        // ignore malformed events
+      }
+    };
+    es.onerror = () => {
+      // EventSource auto-reconnects; nothing to do beyond logging.
+      console.warn('[live tail] connection blip — reconnecting');
+    };
+    return () => es.close();
+  }, [liveTail, perPage]);
 
   useEffect(() => { setPage(1); }, [filters, perPage]);
 
@@ -1354,7 +1562,8 @@ export default function App() {
   };
 
   const clearFilters = () => {
-    setFilters({ user_id: '', device_id: '', environment: '', source: '', search: '', level: '', category: '', http_method: '' });
+    setFilters({ user_id: '', device_id: '', environment: '', source: '', search: '', level: '', category: '', http_method: '', session_id: '', fingerprint: '', app_version: '', start_date: '', end_date: '' });
+    setSearchInput('');
   };
 
   // Single-pass to avoid iterating Object.values(filters) twice
@@ -1444,6 +1653,52 @@ export default function App() {
     }
   };
 
+  const handleExportCsv = async () => {
+    if (exportingCsv) return;
+    setExportingCsv(true);
+    try {
+      const PAGE = 500;
+      const all: Log[] = [];
+      let offset = 0;
+      while (true) {
+        const res = await fetchLogs(filters, PAGE, offset);
+        all.push(...res.logs);
+        if (all.length >= res.total || res.logs.length === 0) break;
+        offset += res.logs.length;
+        if (offset > 100000) break;
+      }
+      const cols: (keyof Log)[] = [
+        'id', 'created_at', 'level', 'environment', 'source', 'user_id', 'device_id',
+        'session_id', 'app_version', 'os_version', 'device_model', 'network_type',
+        'category', 'http_method', 'endpoint', 'status_code', 'duration_ms',
+        'message', 'metadata', 'request_data', 'response_data', 'breadcrumbs',
+      ];
+      const escape = (v: unknown): string => {
+        if (v === null || v === undefined) return '';
+        const s = typeof v === 'object' ? JSON.stringify(v) : String(v);
+        return `"${s.replace(/"/g, '""').replace(/\r?\n/g, '\\n')}"`;
+      };
+      const lines = [cols.join(',')];
+      for (const log of all) {
+        lines.push(cols.map(k => escape(log[k])).join(','));
+      }
+      const blob = new Blob(['﻿' + lines.join('\n')], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const ts = new Date().toISOString().replace(/[:.]/g, '-').split('T')[0];
+      a.href = url;
+      a.download = `logs-${ts}${hasActiveFilters ? '-filtered' : ''}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to export CSV');
+    } finally {
+      setExportingCsv(false);
+    }
+  };
+
   /* ─── Mobile Layout ──────────────────────────── */
   if (isMobile) {
     return (
@@ -1481,25 +1736,45 @@ export default function App() {
 
         <div className="tabs">
           <button className={`tab ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
-            logs ({stats?.total || 0})
+            <Activity size={13} strokeWidth={1.6} /> logs
+          </button>
+          <button className={`tab ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
+            <UsersIcon size={13} strokeWidth={1.6} /> users
+          </button>
+          <button className={`tab ${activeTab === 'errors' ? 'active' : ''}`} onClick={() => setActiveTab('errors')}>
+            <AlertTriangle size={13} strokeWidth={1.6} /> errors
+          </button>
+          <button className={`tab ${activeTab === 'behaviour' ? 'active' : ''}`} onClick={() => setActiveTab('behaviour')}>
+            <Footprints size={13} strokeWidth={1.6} /> behaviour
           </button>
           <button className={`tab ${activeTab === 'archives' ? 'active' : ''}`} onClick={() => setActiveTab('archives')}>
-            archives ({archives.length})
+            <ArchiveIcon size={13} strokeWidth={1.6} /> archives
           </button>
           <button className={`tab ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>
-            analytics
+            <BarChart3 size={13} strokeWidth={1.6} /> analytics
           </button>
         </div>
 
         {activeTab === 'logs' ? (
           <>
             <div className="mobile-search-row">
-              <input
-                type="text"
-                placeholder="Search logs..."
-                value={filters.search}
-                onChange={(ev) => handleFilterChange('search', ev.target.value)}
-              />
+              <div className="search-wrap">
+                <input
+                  type="text"
+                  placeholder="Search any text..."
+                  value={searchInput}
+                  onChange={(ev) => setSearchInput(ev.target.value)}
+                />
+                {searchInput && (
+                  <button
+                    type="button"
+                    className="search-clear"
+                    aria-label="Clear search"
+                    onClick={() => setSearchInput('')}
+                  >×</button>
+                )}
+                <div className="search-progress" data-active={isSearching} aria-hidden="true" />
+              </div>
               <button
                 className={`mobile-filter-btn ${activeFilterCount > 0 ? 'has-filters' : ''}`}
                 onClick={() => setShowFilterSheet(true)}
@@ -1514,6 +1789,14 @@ export default function App() {
                 {hasActiveFilters && <span style={{ color: 'var(--accent)' }}> · filtered</span>}
               </span>
               <div style={{ display: 'flex', gap: '6px' }}>
+                <button
+                  className="btn btn-secondary"
+                  style={{ padding: '5px 10px', fontSize: '11px' }}
+                  onClick={handleExportCsv}
+                  disabled={exportingCsv || total === 0}
+                >
+                  {exportingCsv ? '...' : 'CSV'}
+                </button>
                 <button
                   className="btn btn-danger"
                   style={{ padding: '5px 10px', fontSize: '11px' }}
@@ -1531,7 +1814,7 @@ export default function App() {
               <MobileSkeletonCards count={6} />
             ) : logs.length === 0 ? (
               <div className="empty-state">
-                <div className="empty-state-icon">[ ]</div>
+                <div className="empty-state-icon"><Inbox size={32} strokeWidth={1.4} /></div>
                 <div className="empty-state-title">No logs found</div>
                 <div className="empty-state-sub">
                   {hasActiveFilters ? 'Try adjusting your filters' : 'Logs will appear here once your app starts sending them'}
@@ -1596,7 +1879,7 @@ export default function App() {
             </p>
             {archives.length === 0 ? (
               <div className="empty-state">
-                <div className="empty-state-icon">[ ]</div>
+                <div className="empty-state-icon"><Inbox size={32} strokeWidth={1.4} /></div>
                 <div className="empty-state-title">No archives yet</div>
                 <div className="empty-state-sub">Archives appear here after logs are older than 7 days</div>
               </div>
@@ -1613,8 +1896,33 @@ export default function App() {
               </div>
             )}
           </div>
+        ) : activeTab === 'users' ? (
+          <UsersTab onSelectUser={setOpenUserId} />
+        ) : activeTab === 'errors' ? (
+          <ErrorsTab onSelectGroup={(fp) => {
+            setFilters(prev => ({ ...prev, fingerprint: fp }));
+            setActiveTab('logs');
+          }} />
+        ) : activeTab === 'behaviour' ? (
+          <BehaviourTab />
         ) : (
           <AnalyticsDashboard isMobile={true} />
+        )}
+
+        {openUserId && (
+          <UserProfileModal
+            userId={openUserId}
+            onClose={() => setOpenUserId(null)}
+            onOpenSession={(sid) => { setOpenUserId(null); setOpenSessionId(sid); }}
+            onApplyFingerprint={(fp) => {
+              setFilters(prev => ({ ...prev, fingerprint: fp }));
+              setOpenUserId(null);
+              setActiveTab('logs');
+            }}
+          />
+        )}
+        {openSessionId && (
+          <SessionTimelineModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
         )}
 
         {showBulkDelete && (
@@ -1655,13 +1963,17 @@ export default function App() {
   return (
     <div className="container">
       <header className="header">
-        <h1>
-          <span className="header-prefix">~/</span>private-logger
-        </h1>
+        <div>
+          <div className="kicker">{stats?.total ? `${stats.total.toLocaleString()} entries · ${stats.uniqueUsers} users` : 'observability console'}</div>
+          <h1 style={{ marginTop: 4, display: 'flex', alignItems: 'center', gap: 8 }}>
+            <Terminal size={18} strokeWidth={1.8} style={{ color: 'var(--accent)' }} />
+            <span className="header-prefix">~/</span>private-logger
+          </h1>
+        </div>
         <div className="header-right">
           <div className="refresh-indicator">
-            <div className={`dot ${autoRefresh ? '' : 'dot-paused'}`} />
-            <span>{lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
+            <span className={autoRefresh ? 'dot-led' : ''} style={!autoRefresh ? { display: 'inline-block', width: 6, height: 6, borderRadius: '50%', background: 'var(--text-tertiary)', marginRight: 8 } : undefined} />
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 12, color: 'var(--text-secondary)' }}>{lastRefresh.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
             <label className="auto-refresh-toggle">
               <input
                 type="checkbox"
@@ -1670,14 +1982,28 @@ export default function App() {
               />
               auto
             </label>
-            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px' }} onClick={() => loadData()}>
-              refresh
+            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => loadData()}>
+              <RefreshCw size={12} strokeWidth={1.8} className={loading ? 'spin' : ''} /> refresh
+            </button>
+            <button
+              className="btn btn-secondary"
+              style={{
+                padding: '5px 10px', fontSize: '12px', display: 'inline-flex',
+                alignItems: 'center', gap: 6,
+                color: liveTail ? 'var(--success)' : undefined,
+                borderColor: liveTail ? 'rgba(134,215,161,0.45)' : undefined,
+              }}
+              onClick={() => setLiveTail(p => !p)}
+              title={liveTail ? 'Stop live tail' : 'Start streaming new logs as they arrive'}
+            >
+              <Radio size={12} strokeWidth={1.8} className={liveTail ? 'spin' : ''} />
+              {liveTail ? `live · ${liveCount}` : 'live'}
             </button>
           </div>
           <div className="user-menu">
             <span className="user-name">{user?.username}</span>
-            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px' }} onClick={logout}>
-              logout
+            <button className="btn btn-secondary" style={{ padding: '5px 10px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={logout}>
+              <LogOut size={12} strokeWidth={1.8} /> logout
             </button>
           </div>
         </div>
@@ -1690,26 +2016,52 @@ export default function App() {
 
       <div className="tabs">
         <button className={`tab ${activeTab === 'logs' ? 'active' : ''}`} onClick={() => setActiveTab('logs')}>
-          logs ({stats?.total || 0})
+          <Activity size={14} strokeWidth={1.6} /> logs <span style={{ color: 'var(--text-tertiary)' }}>({stats?.total || 0})</span>
+        </button>
+        <button className={`tab ${activeTab === 'users' ? 'active' : ''}`} onClick={() => setActiveTab('users')}>
+          <UsersIcon size={14} strokeWidth={1.6} /> users
+        </button>
+        <button className={`tab ${activeTab === 'errors' ? 'active' : ''}`} onClick={() => setActiveTab('errors')}>
+          <AlertTriangle size={14} strokeWidth={1.6} /> errors
+        </button>
+        <button className={`tab ${activeTab === 'behaviour' ? 'active' : ''}`} onClick={() => setActiveTab('behaviour')}>
+          <Footprints size={14} strokeWidth={1.6} /> behaviour
         </button>
         <button className={`tab ${activeTab === 'archives' ? 'active' : ''}`} onClick={() => setActiveTab('archives')}>
-          archives ({archives.length})
+          <ArchiveIcon size={14} strokeWidth={1.6} /> archives <span style={{ color: 'var(--text-tertiary)' }}>({archives.length})</span>
         </button>
         <button className={`tab ${activeTab === 'analytics' ? 'active' : ''}`} onClick={() => setActiveTab('analytics')}>
-          analytics
+          <BarChart3 size={14} strokeWidth={1.6} /> analytics
         </button>
       </div>
 
       {activeTab === 'logs' ? (
         <>
+          <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+            <SavedViewsBar
+              filters={filters}
+              onLoad={(f) => { setFilters(f); setSearchInput(f.search ?? ''); }}
+            />
+          </div>
           <div className="filters-container">
             <div className="filters-row-1">
-              <input
-                type="text"
-                placeholder="Search messages, endpoints, data..."
-                value={filters.search}
-                onChange={(ev) => handleFilterChange('search', ev.target.value)}
-              />
+              <div className="search-wrap">
+                <input
+                  type="text"
+                  placeholder="Search any text — messages, metadata, request/response body..."
+                  value={searchInput}
+                  onChange={(ev) => setSearchInput(ev.target.value)}
+                />
+                {searchInput && (
+                  <button
+                    type="button"
+                    className="search-clear"
+                    aria-label="Clear search"
+                    onClick={() => setSearchInput('')}
+                  >×</button>
+                )}
+                <div className="search-progress" data-active={isSearching} aria-hidden="true" />
+              </div>
               <select value={filters.level} onChange={(ev) => handleFilterChange('level', ev.target.value)}>
                 <option value="">All Levels</option>
                 <option value="debug">Debug</option>
@@ -1763,6 +2115,12 @@ export default function App() {
                   <option value="">All Sources</option>
                   {sources.map((src) => <option key={src} value={src}>{src}</option>)}
                 </select>
+                <DateRangeInputs
+                  startValue={filters.start_date ?? ''}
+                  endValue={filters.end_date ?? ''}
+                  onChangeStart={(v) => handleFilterChange('start_date', v)}
+                  onChangeEnd={(v) => handleFilterChange('end_date', v)}
+                />
               </div>
             )}
           </div>
@@ -1776,14 +2134,25 @@ export default function App() {
             </div>
             <div className="table-toolbar-right">
               <button
+                className="btn btn-secondary"
+                style={{ padding: '5px 12px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                onClick={handleExportCsv}
+                disabled={exportingCsv || total === 0}
+                title={hasActiveFilters ? 'Export filtered logs to CSV' : 'Export all logs to CSV'}
+              >
+                <Download size={12} strokeWidth={1.8} />
+                {exportingCsv ? 'Exporting…' : `CSV${hasActiveFilters ? ` (${total.toLocaleString()})` : ''}`}
+              </button>
+              <button
                 className="btn btn-danger"
-                style={{ padding: '5px 12px', fontSize: '12px' }}
+                style={{ padding: '5px 12px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }}
                 onClick={handleDeleteAllFiltered}
               >
-                {hasActiveFilters ? `Delete Filtered (${total.toLocaleString()})` : `Delete All (${total.toLocaleString()})`}
+                <Trash2 size={12} strokeWidth={1.8} />
+                {hasActiveFilters ? `Delete (${total.toLocaleString()})` : `Delete All (${total.toLocaleString()})`}
               </button>
-              <button className="btn btn-danger" style={{ padding: '5px 12px', fontSize: '12px' }} onClick={() => setShowBulkDelete(true)}>
-                Bulk Delete
+              <button className="btn btn-danger" style={{ padding: '5px 12px', fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: 6 }} onClick={() => setShowBulkDelete(true)}>
+                <Trash2 size={12} strokeWidth={1.8} /> Bulk
               </button>
             </div>
           </div>
@@ -1797,7 +2166,7 @@ export default function App() {
             </div>
           ) : logs.length === 0 ? (
             <div className="empty-state">
-              <div className="empty-state-icon">[ ]</div>
+              <div className="empty-state-icon"><Inbox size={32} strokeWidth={1.4} /></div>
               <div className="empty-state-title">No logs found</div>
               <div className="empty-state-sub">
                 {hasActiveFilters ? 'Try adjusting your filters' : 'Logs will appear here once your app starts sending them'}
@@ -1851,8 +2220,33 @@ export default function App() {
           onDelete={handleDeleteArchive}
           timezone={userTimezone}
         />
+      ) : activeTab === 'users' ? (
+        <UsersTab onSelectUser={setOpenUserId} />
+      ) : activeTab === 'errors' ? (
+        <ErrorsTab onSelectGroup={(fp) => {
+          setFilters(prev => ({ ...prev, fingerprint: fp }));
+          setActiveTab('logs');
+        }} />
+      ) : activeTab === 'behaviour' ? (
+        <BehaviourTab />
       ) : (
         <AnalyticsDashboard isMobile={false} />
+      )}
+
+      {openUserId && (
+        <UserProfileModal
+          userId={openUserId}
+          onClose={() => setOpenUserId(null)}
+          onOpenSession={(sid) => { setOpenUserId(null); setOpenSessionId(sid); }}
+          onApplyFingerprint={(fp) => {
+            setFilters(prev => ({ ...prev, fingerprint: fp }));
+            setOpenUserId(null);
+            setActiveTab('logs');
+          }}
+        />
+      )}
+      {openSessionId && (
+        <SessionTimelineModal sessionId={openSessionId} onClose={() => setOpenSessionId(null)} />
       )}
 
       {showBulkDelete && (

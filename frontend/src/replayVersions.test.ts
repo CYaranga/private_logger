@@ -19,6 +19,14 @@ const baseLog: Log = {
   response_data: { ok: true },
   status_code: 200,
   duration_ms: 100,
+  session_id: null,
+  trace_id: null,
+  app_version: null,
+  os_version: null,
+  device_model: null,
+  network_type: null,
+  fingerprint: null,
+  breadcrumbs: null,
 };
 
 describe('buildVersionList', () => {
