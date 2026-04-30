@@ -8,6 +8,7 @@ import { executeReplay } from './replay/handler';
 import { redactPii, redactValue } from './redact';
 import { computeFingerprint } from './fingerprint';
 import { snapshotRelatedLogIds, fetchLogsByIds } from './bugs';
+import { createMcpRouter } from './mcp';
 import { buildHumanSummary } from './triage';
 import { OPENAPI_SPEC } from './openapi';
 
@@ -2396,6 +2397,11 @@ app.delete('/replays/:id', authMiddleware, async (c) => {
     return c.json({ error: 'Failed to delete replay' }, 500);
   }
 });
+
+// Mount MCP HTTP sub-router. Auth: pl_live_ bearer only — agents call directly,
+// session cookies are intentionally rejected on this surface. The mcp module
+// is intentionally generic over Bindings; cast to keep it decoupled.
+app.route('/mcp', createMcpRouter(app as unknown as Parameters<typeof createMcpRouter>[0]));
 
 export default {
   fetch: app.fetch,
