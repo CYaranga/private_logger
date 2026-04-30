@@ -284,3 +284,63 @@ export async function updateErrorGroupState(
   }));
   if (!response.ok) throw new Error('Failed to update error group state');
 }
+
+import type { BugReport, BugStatus, ApiToken, ApiTokenCreated, TriageSummary, TraceResult } from './types';
+
+export async function fetchBugs(opts: { status?: BugStatus; user_id?: string; limit?: number; offset?: number } = {}): Promise<{ bugs: BugReport[]; limit: number; offset: number }> {
+  const params = new URLSearchParams();
+  for (const [k, v] of Object.entries(opts)) if (v !== undefined) params.append(k, String(v));
+  const res = await fetch(`${API_BASE}/bugs?${params}`, getFetchOptions());
+  if (!res.ok) throw new Error('Failed to fetch bugs');
+  return res.json();
+}
+
+export async function fetchBug(id: number): Promise<BugReport> {
+  const res = await fetch(`${API_BASE}/bugs/${id}`, getFetchOptions());
+  if (!res.ok) throw new Error('Failed to fetch bug');
+  return res.json();
+}
+
+export async function triageBug(id: number, patch: { status?: BugStatus; assigned_to?: string | null; note?: string | null }): Promise<void> {
+  const res = await fetch(`${API_BASE}/bugs/${id}`, getFetchOptions({
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(patch),
+  }));
+  if (!res.ok) throw new Error('Failed to update bug');
+}
+
+export function getBugScreenshotUrl(id: number): string {
+  return `${API_BASE}/bugs/${id}/screenshot`;
+}
+
+export async function listApiTokens(): Promise<{ tokens: ApiToken[] }> {
+  const res = await fetch(`${API_BASE}/auth/tokens`, getFetchOptions());
+  if (!res.ok) throw new Error('Failed to list tokens');
+  return res.json();
+}
+
+export async function createApiToken(name: string, expiresInDays?: number): Promise<ApiTokenCreated> {
+  const res = await fetch(`${API_BASE}/auth/tokens`, getFetchOptions({
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, expires_in_days: expiresInDays }),
+  }));
+  if (!res.ok) throw new Error('Failed to create token');
+  return res.json();
+}
+
+export async function revokeApiToken(id: number): Promise<void> {
+  const res = await fetch(`${API_BASE}/auth/tokens/${id}`, getFetchOptions({ method: 'DELETE' }));
+  if (!res.ok) throw new Error('Failed to revoke token');
+}
+
+export async function fetchTriageSummary(since?: string): Promise<TriageSummary> {
+  const url = `${API_BASE}/agent/triage-summary${since ? `?since=${encodeURIComponent(since)}` : ''}`;
+  const res = await fetch(url, getFetchOptions());
+  if (!res.ok) throw new Error('Failed to fetch triage summary');
+  return res.json();
+}
+
+export async function fetchTrace(traceId: string): Promise<TraceResult> {
+  const res = await fetch(`${API_BASE}/trace/${encodeURIComponent(traceId)}`, getFetchOptions());
+  if (!res.ok) throw new Error('Failed to fetch trace');
+  return res.json();
+}

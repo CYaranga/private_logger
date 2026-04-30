@@ -2,14 +2,20 @@ import { Hono, type Context, type Next } from 'hono';
 import { cors } from 'hono/cors';
 import { getCookie, setCookie, deleteCookie } from 'hono/cookie';
 import { validateReplayUrl } from './replay/ssrf';
+import { generateTokenPlaintext, hashToken, tokenPrefix } from './tokens';
 import { sanitizeHeadersForStorage } from './replay/sanitize';
 import { executeReplay } from './replay/handler';
 import { redactPii, redactValue } from './redact';
 import { computeFingerprint } from './fingerprint';
+import { snapshotRelatedLogIds, fetchLogsByIds } from './bugs';
+import { createMcpRouter } from './mcp';
+import { buildHumanSummary } from './triage';
+import { OPENAPI_SPEC } from './openapi';
 
 type Bindings = {
   DB: D1Database;
   ANALYTICS_DB: D1Database;
+  SCREENSHOTS: R2Bucket;
 };
 
 type User = {
@@ -321,6 +327,8 @@ app.get('/', (c) => {
   return c.json({ status: 'ok', service: 'private-logger-api', version: '2.0.0' });
 });
 
+app.get('/openapi.json', (c) => c.json(OPENAPI_SPEC));
+
 // Auth endpoints (no authentication required)
 app.post('/auth/login', async (c) => {
   try {
@@ -422,25 +430,100 @@ app.get('/auth/verify', async (c) => {
 
 // Auth middleware for protected routes
 const authMiddleware = async (c: Context<{ Bindings: Bindings }>, next: Next) => {
-  const sessionToken = getCookie(c, 'session') || c.req.header('Authorization')?.replace('Bearer ', '');
-
-  if (!sessionToken) {
-    return c.json({ error: 'Authentication required' }, 401);
+  // 1) API token via Authorization: Bearer pl_live_<32>
+  const authHeader = c.req.header('Authorization');
+  if (authHeader?.startsWith('Bearer pl_live_')) {
+    const plaintext = authHeader.slice('Bearer '.length).trim();
+    const hash = await hashToken(plaintext);
+    const tokenRow = await c.env.DB.prepare(
+      `SELECT t.id AS token_id, t.expires_at, u.id, u.username, u.password_hash, u.created_at
+       FROM api_tokens t JOIN users u ON u.id = t.user_id
+       WHERE t.hash = ? LIMIT 1`
+    ).bind(hash).first<{
+      token_id: number; expires_at: string | null;
+      id: number; username: string; password_hash: string; created_at: string;
+    }>();
+    if (tokenRow) {
+      if (tokenRow.expires_at && new Date(tokenRow.expires_at).getTime() < Date.now()) {
+        return c.json({ error: 'Token expired' }, 401);
+      }
+      // Fire-and-forget last_used update
+      c.env.DB.prepare('UPDATE api_tokens SET last_used = CURRENT_TIMESTAMP WHERE id = ?')
+        .bind(tokenRow.token_id).run().catch(() => {});
+      c.set('user' as never, {
+        id: tokenRow.id,
+        username: tokenRow.username,
+        password_hash: tokenRow.password_hash,
+        created_at: tokenRow.created_at,
+      } as never);
+      await next();
+      return;
+    }
+    return c.json({ error: 'Invalid token' }, 401);
   }
 
+  // 2) Session cookie or legacy Authorization: Bearer <session-id>
+  const sessionToken = getCookie(c, 'session') || authHeader?.replace('Bearer ', '');
+  if (!sessionToken) return c.json({ error: 'Authentication required' }, 401);
   const user = await validateSession(c.env.DB, sessionToken);
-
-  if (!user) {
-    return c.json({ error: 'Invalid or expired session' }, 401);
-  }
-
-  // Store user in context for later use
+  if (!user) return c.json({ error: 'Invalid or expired session' }, 401);
   c.set('user' as never, user as never);
   await next();
 };
 
 // Auth middleware is available but not applied to API routes.
 // Authentication is handled on the frontend side only.
+
+// API token management. Plaintext is returned exactly once; only hash is stored.
+app.post('/auth/tokens', authMiddleware, async (c) => {
+  try {
+    const body = await c.req.json<{ name: string; expires_in_days?: number }>();
+    if (!body.name?.trim()) return c.json({ error: 'name is required' }, 400);
+    const user = c.get('user' as never) as User;
+    const plaintext = generateTokenPlaintext();
+    const hash = await hashToken(plaintext);
+    const prefix = tokenPrefix(plaintext);
+    const expiresAt = body.expires_in_days
+      ? new Date(Date.now() + body.expires_in_days * 86400_000).toISOString()
+      : null;
+    const result = await c.env.DB.prepare(
+      `INSERT INTO api_tokens (hash, prefix, name, user_id, expires_at)
+       VALUES (?, ?, ?, ?, ?) RETURNING id`
+    ).bind(hash, prefix, body.name.trim(), user.id, expiresAt).first<{ id: number }>();
+    return c.json({ id: result?.id, plaintext, prefix });
+  } catch (error) {
+    console.error('Error creating token:', error);
+    return c.json({ error: 'Failed to create token' }, 500);
+  }
+});
+
+app.get('/auth/tokens', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user' as never) as User;
+    const { results } = await c.env.DB.prepare(
+      `SELECT id, prefix, name, created_at, expires_at, last_used
+       FROM api_tokens WHERE user_id = ? ORDER BY created_at DESC`
+    ).bind(user.id).all();
+    return c.json({ tokens: results || [] });
+  } catch (error) {
+    console.error('Error listing tokens:', error);
+    return c.json({ error: 'Failed to list tokens' }, 500);
+  }
+});
+
+app.delete('/auth/tokens/:id', authMiddleware, async (c) => {
+  try {
+    const user = c.get('user' as never) as User;
+    const id = parseInt(c.req.param('id'), 10);
+    const result = await c.env.DB.prepare(
+      'DELETE FROM api_tokens WHERE id = ? AND user_id = ?'
+    ).bind(id, user.id).run();
+    return c.json({ success: true, deleted: result.meta.changes });
+  } catch (error) {
+    console.error('Error revoking token:', error);
+    return c.json({ error: 'Failed to revoke token' }, 500);
+  }
+});
 
 // Create a new log entry
 app.post('/logs', async (c) => {
@@ -1226,6 +1309,80 @@ app.patch('/errors/groups/:fingerprint/state', authMiddleware, async (c) => {
   }
 });
 
+app.get('/agent/triage-summary', authMiddleware, async (c) => {
+  try {
+    const sinceParam = c.req.query('since');
+    const since = sinceParam || new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+
+    const exclude = `category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
+
+    const openGroups = await c.env.DB.prepare(
+      `SELECT l.fingerprint, COUNT(*) AS occurrences,
+              COUNT(DISTINCT l.user_id) AS affected_users,
+              MAX(l.endpoint) AS endpoint, MAX(l.level) AS level,
+              MAX(l.message) AS sample_message, MIN(l.created_at) AS first_seen,
+              MAX(l.created_at) AS last_seen
+       FROM logs l
+       LEFT JOIN error_group_states s ON s.fingerprint = l.fingerprint
+       WHERE l.level IN ('error','warn') AND l.fingerprint IS NOT NULL
+         AND ${exclude} AND l.created_at >= ?
+       GROUP BY l.fingerprint
+       HAVING COALESCE(s.status, 'open') = 'open'
+       ORDER BY occurrences DESC LIMIT 10`
+    ).bind(since).all();
+
+    const regressed = ((openGroups.results ?? []) as Array<{ first_seen: string }>)
+      .filter((g) => g.first_seen >= since);
+
+    const affectedUsersRow = await c.env.DB.prepare(
+      `SELECT COUNT(DISTINCT user_id) AS n FROM logs
+       WHERE level = 'error' AND ${exclude} AND created_at >= ?`
+    ).bind(since).first<{ n: number }>();
+
+    const topEndpointRow = await c.env.DB.prepare(
+      `SELECT endpoint, COUNT(*) AS n FROM logs
+       WHERE level = 'error' AND endpoint IS NOT NULL AND ${exclude} AND created_at >= ?
+       GROUP BY endpoint ORDER BY n DESC LIMIT 1`
+    ).bind(since).first<{ endpoint: string; n: number }>();
+
+    const activeAppVersions = await c.env.DB.prepare(
+      `SELECT app_version, COUNT(DISTINCT user_id) AS users,
+              SUM(CASE WHEN level = 'error' THEN 1 ELSE 0 END) AS errors
+       FROM logs WHERE app_version IS NOT NULL AND ${exclude} AND created_at >= ?
+       GROUP BY app_version ORDER BY users DESC LIMIT 5`
+    ).bind(since).all<{ app_version: string; users: number; errors: number }>();
+
+    const topAppVersion = activeAppVersions.results?.[0]?.app_version ?? null;
+
+    const untriagedRow = await c.env.DB.prepare(
+      `SELECT COUNT(*) AS n FROM bug_reports WHERE status = 'new'`
+    ).first<{ n: number }>();
+
+    const summary = buildHumanSummary({
+      open_groups: openGroups.results?.length ?? 0,
+      affected_users: affectedUsersRow?.n ?? 0,
+      regressed: regressed.length,
+      untriaged_bugs: untriagedRow?.n ?? 0,
+      top_endpoint: topEndpointRow?.endpoint ?? null,
+      top_app_version: topAppVersion,
+    });
+
+    return c.json({
+      since,
+      open_error_groups: openGroups.results ?? [],
+      regressed_errors: regressed,
+      affected_users_24h: affectedUsersRow?.n ?? 0,
+      top_endpoints_by_error_rate: topEndpointRow ? [{ endpoint: topEndpointRow.endpoint, count: topEndpointRow.n }] : [],
+      active_app_versions: activeAppVersions.results ?? [],
+      untriaged_bug_reports: untriagedRow?.n ?? 0,
+      summary_for_humans: summary,
+    });
+  } catch (error) {
+    console.error('Error building triage summary:', error);
+    return c.json({ error: 'Failed to build summary' }, 500);
+  }
+});
+
 // Rich user list. Returns one row per user_id with last activity, device,
 // app version, and error count — designed for the "Users" tab in the UI.
 app.get('/users/rich', async (c) => {
@@ -1897,6 +2054,39 @@ async function scheduled(
 
 }
 
+// Cross-system trace correlation. Joins logs + behaviour_events: first
+// finds all logs sharing this trace_id, then pulls behaviour events whose
+// session_id intersects (behaviour_events doesn't carry trace_id directly
+// in the current schema).
+app.get('/trace/:trace_id', authMiddleware, async (c) => {
+  try {
+    const traceId = c.req.param('trace_id');
+    const logsRes = await c.env.DB.prepare(
+      'SELECT * FROM logs WHERE trace_id = ? ORDER BY created_at ASC'
+    ).bind(traceId).all<Log>();
+    const sessionIds = Array.from(new Set(
+      (logsRes.results ?? []).map((l) => l.session_id).filter((s): s is string => !!s)
+    ));
+    let behaviourEvents: Record<string, unknown>[] = [];
+    if (sessionIds.length > 0) {
+      const placeholders = sessionIds.map(() => '?').join(',');
+      const eventsRes = await c.env.ANALYTICS_DB.prepare(
+        `SELECT * FROM behaviour_events WHERE session_id IN (${placeholders})
+         ORDER BY created_at ASC`
+      ).bind(...sessionIds).all();
+      behaviourEvents = eventsRes.results ?? [];
+    }
+    return c.json({
+      trace_id: traceId,
+      logs: (logsRes.results ?? []).map(parseLogFields),
+      behaviour_events: behaviourEvents,
+    });
+  } catch (error) {
+    console.error('Error fetching trace:', error);
+    return c.json({ error: 'Failed to fetch trace' }, 500);
+  }
+});
+
 app.post('/admin/reprocess', async (c) => {
   try {
     const { results } = await c.env.DB.prepare(
@@ -1933,6 +2123,158 @@ app.post('/admin/reprocess', async (c) => {
   } catch (error) {
     console.error('Reprocess error:', error);
     return c.json({ error: 'Reprocess failed' }, 500);
+  }
+});
+
+// Bug reports — public POST (single-user installation), authenticated read.
+// Description and breadcrumbs run through redactPii on insert.
+app.post('/bugs', async (c) => {
+  try {
+    const body = await c.req.json<{
+      user_id: string;
+      session_id?: string;
+      description: string;
+      severity?: 'low' | 'medium' | 'high' | 'critical';
+      device_model?: string;
+      os_version?: string;
+      app_version?: string;
+      network_type?: string;
+      breadcrumbs?: Array<Record<string, unknown>>;
+    }>();
+    if (!body.user_id || !body.description) {
+      return c.json({ error: 'user_id and description are required' }, 400);
+    }
+    const cleanDescription = redactPii(body.description);
+    const cleanBreadcrumbs = body.breadcrumbs
+      ? JSON.stringify(redactValue(body.breadcrumbs))
+      : null;
+    const sessionId = body.session_id ?? null;
+    const relatedIds = await snapshotRelatedLogIds(c.env.DB, body.user_id, sessionId);
+    const result = await c.env.DB.prepare(
+      `INSERT INTO bug_reports
+         (user_id, session_id, severity, description, device_model, os_version,
+          app_version, network_type, breadcrumbs, related_log_ids)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`
+    ).bind(
+      body.user_id, sessionId, body.severity ?? 'medium', cleanDescription,
+      body.device_model ?? null, body.os_version ?? null, body.app_version ?? null,
+      body.network_type ?? null, cleanBreadcrumbs, JSON.stringify(relatedIds),
+    ).first<{ id: number }>();
+    const id = result?.id;
+    return c.json({
+      id,
+      screenshot_upload_url: `/bugs/${id}/screenshot`,
+    }, 201);
+  } catch (error) {
+    console.error('Error creating bug:', error);
+    return c.json({ error: 'Failed to create bug' }, 500);
+  }
+});
+
+app.put('/bugs/:id/screenshot', async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    if (Number.isNaN(id)) return c.json({ error: 'invalid id' }, 400);
+    const contentType = c.req.header('content-type') ?? 'image/png';
+    const data = await c.req.arrayBuffer();
+    if (data.byteLength === 0) return c.json({ error: 'empty body' }, 400);
+    if (data.byteLength > 2 * 1024 * 1024) return c.json({ error: 'too large (max 2MB)' }, 413);
+    const key = `bugs/${id}/screenshot.png`;
+    await c.env.SCREENSHOTS.put(key, data, { httpMetadata: { contentType } });
+    await c.env.DB.prepare('UPDATE bug_reports SET screenshot_url = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+      .bind(key, id).run();
+    return c.json({ success: true, key });
+  } catch (error) {
+    console.error('Error uploading screenshot:', error);
+    return c.json({ error: 'Failed to upload screenshot' }, 500);
+  }
+});
+
+// Authenticated read of stored screenshot. Worker-proxied so we don't
+// expose the R2 bucket publicly.
+app.get('/bugs/:id/screenshot', authMiddleware, async (c) => {
+  const id = parseInt(c.req.param('id'), 10);
+  const row = await c.env.DB.prepare('SELECT screenshot_url FROM bug_reports WHERE id = ?')
+    .bind(id).first<{ screenshot_url: string | null }>();
+  if (!row?.screenshot_url) return c.json({ error: 'no screenshot' }, 404);
+  const obj = await c.env.SCREENSHOTS.get(row.screenshot_url);
+  if (!obj) return c.json({ error: 'object missing' }, 404);
+  const headers = new Headers();
+  obj.writeHttpMetadata(headers);
+  headers.set('cache-control', 'private, max-age=300');
+  return new Response(obj.body, { headers });
+});
+
+app.get('/bugs', authMiddleware, async (c) => {
+  try {
+    const status = c.req.query('status');
+    const userId = c.req.query('user_id');
+    const limit = parseInt(c.req.query('limit') || '100', 10);
+    const offset = parseInt(c.req.query('offset') || '0', 10);
+
+    let where = 'WHERE 1=1';
+    const params: (string | number)[] = [];
+    if (status) { where += ' AND status = ?'; params.push(status); }
+    if (userId) { where += ' AND user_id = ?'; params.push(userId); }
+    const { results } = await c.env.DB.prepare(
+      `SELECT * FROM bug_reports ${where}
+       ORDER BY created_at DESC LIMIT ? OFFSET ?`
+    ).bind(...params, limit, offset).all();
+
+    const bugs = (results ?? []).map((r) => ({
+      ...r,
+      breadcrumbs: r.breadcrumbs ? JSON.parse(r.breadcrumbs as string) : null,
+      related_log_ids: r.related_log_ids ? JSON.parse(r.related_log_ids as string) : [],
+      screenshot_url: r.screenshot_url ? `/bugs/${r.id}/screenshot` : null,
+    }));
+    return c.json({ bugs, limit, offset });
+  } catch (error) {
+    console.error('Error listing bugs:', error);
+    return c.json({ error: 'Failed to list bugs' }, 500);
+  }
+});
+
+app.get('/bugs/:id', authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    const row = await c.env.DB.prepare('SELECT * FROM bug_reports WHERE id = ?')
+      .bind(id).first<Record<string, unknown>>();
+    if (!row) return c.json({ error: 'not found' }, 404);
+    const ids = row.related_log_ids ? JSON.parse(row.related_log_ids as string) : [];
+    const relatedLogs = await fetchLogsByIds(c.env.DB, ids as number[]);
+    return c.json({
+      ...row,
+      breadcrumbs: row.breadcrumbs ? JSON.parse(row.breadcrumbs as string) : null,
+      related_log_ids: ids,
+      related_logs: relatedLogs,
+      screenshot_url: row.screenshot_url ? `/bugs/${id}/screenshot` : null,
+    });
+  } catch (error) {
+    console.error('Error fetching bug:', error);
+    return c.json({ error: 'Failed to fetch bug' }, 500);
+  }
+});
+
+app.patch('/bugs/:id', authMiddleware, async (c) => {
+  try {
+    const id = parseInt(c.req.param('id'), 10);
+    const body = await c.req.json<{
+      status?: 'new' | 'triaged' | 'in_progress' | 'resolved' | 'wontfix';
+      assigned_to?: string | null;
+      note?: string | null;
+    }>();
+    await c.env.DB.prepare(
+      `UPDATE bug_reports SET
+         status = COALESCE(?, status),
+         assigned_to = COALESCE(?, assigned_to),
+         note = COALESCE(?, note),
+         updated_at = CURRENT_TIMESTAMP
+       WHERE id = ?`
+    ).bind(body.status ?? null, body.assigned_to ?? null, body.note ?? null, id).run();
+    return c.json({ success: true });
+  } catch (error) {
+    console.error('Error updating bug:', error);
+    return c.json({ error: 'Failed to update bug' }, 500);
   }
 });
 
@@ -2055,6 +2397,11 @@ app.delete('/replays/:id', authMiddleware, async (c) => {
     return c.json({ error: 'Failed to delete replay' }, 500);
   }
 });
+
+// Mount MCP HTTP sub-router. Auth: pl_live_ bearer only — agents call directly,
+// session cookies are intentionally rejected on this surface. The mcp module
+// is intentionally generic over Bindings; cast to keep it decoupled.
+app.route('/mcp', createMcpRouter(app as unknown as Parameters<typeof createMcpRouter>[0]));
 
 export default {
   fetch: app.fetch,
