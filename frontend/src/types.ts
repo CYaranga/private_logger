@@ -242,3 +242,57 @@ export interface CreateReplayInput {
   headers?: Record<string, string>;
   body?: unknown;
 }
+
+export type BugStatus = 'new' | 'triaged' | 'in_progress' | 'resolved' | 'wontfix';
+export type BugSeverity = 'low' | 'medium' | 'high' | 'critical';
+
+export interface BugReport {
+  id: number;
+  user_id: string;
+  session_id: string | null;
+  severity: BugSeverity;
+  description: string;
+  device_model: string | null;
+  os_version: string | null;
+  app_version: string | null;
+  network_type: string | null;
+  breadcrumbs: Breadcrumb[] | null;
+  related_log_ids: number[];
+  related_logs?: Log[];
+  screenshot_url: string | null;
+  status: BugStatus;
+  assigned_to: string | null;
+  note: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiToken {
+  id: number;
+  prefix: string;
+  name: string;
+  created_at: string;
+  expires_at: string | null;
+  last_used: string | null;
+}
+
+export interface ApiTokenCreated extends ApiToken {
+  plaintext: string;
+}
+
+export interface TriageSummary {
+  since: string;
+  open_error_groups: ErrorGroup[];
+  regressed_errors: ErrorGroup[];
+  affected_users_24h: number;
+  top_endpoints_by_error_rate: Array<{ endpoint: string; count: number }>;
+  active_app_versions: Array<{ app_version: string; users: number; errors: number }>;
+  untriaged_bug_reports: number;
+  summary_for_humans: string;
+}
+
+export interface TraceResult {
+  trace_id: string;
+  logs: Log[];
+  behaviour_events: Array<Record<string, unknown>>;
+}
