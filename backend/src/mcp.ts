@@ -22,8 +22,8 @@ interface ToolDef {
 const TOOLS: ToolDef[] = [
   {
     name: 'search_logs',
-    description: 'Search logs with filters. Returns paginated entries.',
-    inputSchema: { type: 'object', properties: { level: { type: 'string' }, environment: { type: 'string' }, source: { type: 'string' }, user_id: { type: 'string' }, session_id: { type: 'string' }, fingerprint: { type: 'string' }, search: { type: 'string' }, start_date: { type: 'string' }, end_date: { type: 'string' }, limit: { type: 'integer' } } },
+    description: 'Search logs with filters (app_version for a specific build, source for platform e.g. travel-mobile-ios/android, environment, level, dates). Returns paginated entries.',
+    inputSchema: { type: 'object', properties: { level: { type: 'string' }, environment: { type: 'string' }, source: { type: 'string' }, user_id: { type: 'string' }, session_id: { type: 'string' }, fingerprint: { type: 'string' }, app_version: { type: 'string' }, search: { type: 'string' }, start_date: { type: 'string' }, end_date: { type: 'string' }, limit: { type: 'integer' } } },
     async call(args, { fetch }) {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(args)) {
