@@ -34,6 +34,19 @@ const TOOLS: ToolDef[] = [
     },
   },
   {
+    name: 'search_behaviour',
+    description: 'Search raw user-behaviour events (taps, screen views, funnel steps). These are USER_ACTION logs and they are NOT in the logs table, so search_logs can never return them. Filter by action and subject (the two halves of the "action:subject" label, e.g. calendar / map_toggled), source (platform), environment, user_id, session_id, app_version, screen, free text and dates. Returns the most recent matches in chronological order — the way to reconstruct step by step what a user did before the problem they reported.',
+    inputSchema: { type: 'object', properties: { action: { type: 'string' }, subject: { type: 'string' }, source: { type: 'string' }, environment: { type: 'string' }, user_id: { type: 'string' }, session_id: { type: 'string' }, app_version: { type: 'string' }, screen: { type: 'string' }, search: { type: 'string' }, start_date: { type: 'string' }, end_date: { type: 'string' }, limit: { type: 'integer', maximum: 1000 } } },
+    async call(args, { fetch }) {
+      const params = new URLSearchParams();
+      for (const [k, v] of Object.entries(args)) {
+        if (v !== undefined && v !== null && v !== '') params.append(k, String(v));
+      }
+      const res = await fetch(`/behaviour/events?${params.toString()}`);
+      return res.json();
+    },
+  },
+  {
     name: 'get_log',
     description: 'Fetch a single log entry by id.',
     inputSchema: { type: 'object', required: ['id'], properties: { id: { type: 'integer' } } },

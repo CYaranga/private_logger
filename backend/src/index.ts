@@ -258,50 +258,69 @@ async function processBehaviourLog(
   const device_model = log.device_model ?? (parsed.device_model as string | undefined) ?? null;
   const network_type = log.network_type ?? (parsed.network_type as string | undefined) ?? null;
 
-  await analyticsDb.prepare(
-    `INSERT INTO behaviour_events
-       (user_id, device_id, action, subject, screen, metadata, environment, source, created_at,
-        session_id, app_version, os_version, device_model, network_type)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(log.user_id, log.device_id, action, subject, screen,
-         log.metadata, log.environment, source, log.created_at,
-         session_id, app_version, os_version, device_model, network_type).run();
+  // Las cinco escrituras van en UN batch() porque D1 lo ejecuta como una sola
+  // transaccion: o entran todas o no entra ninguna.
+  //
+  // Antes eran cinco round-trips sueltos y, si fallaba cualquiera menos el
+  // primero, el evento quedaba ya insertado en behaviour_events mientras la
+  // fila de `logs` se retenia para reintento (ver el catch del POST /logs y el
+  // cron). El reintento volvia a ejecutar TODO -> evento duplicado y agregados
+  // contados dos veces. Verificado en prod (2026-08-13): la sesion
+  // 0msqsuyc6-ovs-39lov5v0q5v0 tenia sus 8 eventos ya en behaviour_events y sus
+  // 8 filas todavia en `logs`, esperando un reintento que las habria duplicado.
+  //
+  // De paso baja de 5 round-trips a 1 sobre la misma D1, que es justo donde se
+  // concentra la contencion en las rafagas donde se producen estos fallos.
+  //
+  // unique_users pasa a calcularse con un subselect dentro del UPDATE: el
+  // SELECT COUNT(*) previo no cabe en un batch y ademas era una lectura fuera
+  // de transaccion, asi que dos peticiones simultaneas escribian el mismo
+  // valor obsoleto.
+  await analyticsDb.batch([
+    analyticsDb.prepare(
+      `INSERT INTO behaviour_events
+         (user_id, device_id, action, subject, screen, metadata, environment, source, created_at,
+          session_id, app_version, os_version, device_model, network_type)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).bind(log.user_id, log.device_id, action, subject, screen,
+           log.metadata, log.environment, source, log.created_at,
+           session_id, app_version, os_version, device_model, network_type),
 
-  await analyticsDb.prepare(
-    `INSERT INTO daily_aggregates (date, action, subject, environment, source, count, unique_users)
-     VALUES (?, ?, ?, ?, ?, 1, 0)
-     ON CONFLICT(date, action, subject, environment, source)
-     DO UPDATE SET count = count + 1`
-  ).bind(date, action, subject, log.environment, source).run();
+    analyticsDb.prepare(
+      `INSERT INTO daily_aggregates (date, action, subject, environment, source, count, unique_users)
+       VALUES (?, ?, ?, ?, ?, 1, 0)
+       ON CONFLICT(date, action, subject, environment, source)
+       DO UPDATE SET count = count + 1`
+    ).bind(date, action, subject, log.environment, source),
 
-  await analyticsDb.prepare(
-    `INSERT OR IGNORE INTO daily_users (date, action, subject, user_id, environment, source)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).bind(date, action, subject, log.user_id, log.environment, source).run();
+    analyticsDb.prepare(
+      `INSERT OR IGNORE INTO daily_users (date, action, subject, user_id, environment, source)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(date, action, subject, log.user_id, log.environment, source),
 
-  const row = await analyticsDb.prepare(
-    `SELECT COUNT(*) as cnt FROM daily_users
-     WHERE date = ? AND action = ? AND subject = ? AND environment = ?
-       AND (source IS ? OR (source IS NULL AND ? IS NULL))`
-  ).bind(date, action, subject, log.environment, source, source)
-   .first<{ cnt: number }>();
+    analyticsDb.prepare(
+      `UPDATE daily_aggregates
+       SET unique_users = (
+         SELECT COUNT(*) FROM daily_users
+         WHERE date = ? AND action = ? AND subject = ? AND environment = ?
+           AND (source IS ? OR (source IS NULL AND ? IS NULL))
+       )
+       WHERE date = ? AND action = ? AND subject = ? AND environment = ?
+         AND (source IS ? OR (source IS NULL AND ? IS NULL))`
+    ).bind(date, action, subject, log.environment, source, source,
+           date, action, subject, log.environment, source, source),
 
-  await analyticsDb.prepare(
-    `UPDATE daily_aggregates SET unique_users = ?
-     WHERE date = ? AND action = ? AND subject = ? AND environment = ?
-       AND (source IS ? OR (source IS NULL AND ? IS NULL))`
-  ).bind(row?.cnt ?? 0, date, action, subject, log.environment, source, source).run();
-
-  // Per-version slice. Lets non-technical team members compare how a given
-  // (action, subject) performs across app builds — funnel regressions show
-  // up as a sudden drop on a specific app_version.
-  await analyticsDb.prepare(
-    `INSERT INTO daily_aggregates_by_version
-       (date, action, subject, environment, source, app_version, count, unique_users)
-     VALUES (?, ?, ?, ?, ?, ?, 1, 0)
-     ON CONFLICT(date, action, subject, environment, source, app_version)
-     DO UPDATE SET count = count + 1`
-  ).bind(date, action, subject, log.environment, source, app_version).run();
+    // Per-version slice. Lets non-technical team members compare how a given
+    // (action, subject) performs across app builds — funnel regressions show
+    // up as a sudden drop on a specific app_version.
+    analyticsDb.prepare(
+      `INSERT INTO daily_aggregates_by_version
+         (date, action, subject, environment, source, app_version, count, unique_users)
+       VALUES (?, ?, ?, ?, ?, ?, 1, 0)
+       ON CONFLICT(date, action, subject, environment, source, app_version)
+       DO UPDATE SET count = count + 1`
+    ).bind(date, action, subject, log.environment, source, app_version),
+  ]);
 }
 
 const app = new Hono<{ Bindings: Bindings }>();
@@ -1565,6 +1584,75 @@ app.get('/behaviour/by-version', async (c) => {
   } catch (error) {
     console.error('Error fetching behaviour by version:', error);
     return c.json({ error: 'Failed to fetch behaviour by version' }, 500);
+  }
+});
+
+// Eventos de comportamiento EN CRUDO. Los dos endpoints de arriba devuelven
+// agregados: contestan "que se usa mas", no "que hizo este usuario". Y los
+// USER_ACTION no estan en la tabla `logs` (POST /logs los mueve a
+// behaviour_events y borra la fila), asi que GET /logs tampoco los encuentra
+// nunca. Sin esto no hay forma de reconstruir los pasos de alguien que reporta
+// un fallo.
+//
+// Va con authMiddleware, a diferencia de /behaviour/top-actions y
+// /behaviour/by-version: aqui salen filas por usuario (user_id, session_id,
+// device_model, metadata), del mismo nivel de sensibilidad que /logs, /trace
+// y /bugs, que si estan protegidos.
+app.get('/behaviour/events', authMiddleware, async (c) => {
+  try {
+    const action = c.req.query('action');
+    const subject = c.req.query('subject');
+    const source = c.req.query('source');
+    const environment = c.req.query('environment');
+    const user_id = c.req.query('user_id');
+    const session_id = c.req.query('session_id');
+    const app_version = c.req.query('app_version');
+    const screen = c.req.query('screen');
+    const search = c.req.query('search');
+    const start_date = c.req.query('start_date');
+    const end_date = c.req.query('end_date');
+    // Tope duro: un agente puede pedir limit=100000 y reventar la respuesta.
+    const limit = Math.min(Math.max(parseInt(c.req.query('limit') || '100') || 100, 1), 1000);
+
+    let query = 'SELECT * FROM behaviour_events WHERE 1=1';
+    const params: (string | number)[] = [];
+
+    if (action) { query += ' AND action = ?'; params.push(action); }
+    if (subject) { query += ' AND subject = ?'; params.push(subject); }
+    if (source) { query += ' AND source = ?'; params.push(source); }
+    if (environment) { query += ' AND environment = ?'; params.push(environment); }
+    if (user_id) { query += ' AND user_id = ?'; params.push(user_id); }
+    if (session_id) { query += ' AND session_id = ?'; params.push(session_id); }
+    if (app_version) { query += ' AND app_version = ?'; params.push(app_version); }
+    if (screen) { query += ' AND screen = ?'; params.push(screen); }
+    if (start_date) { query += ' AND created_at >= ?'; params.push(start_date); }
+    if (end_date) { query += ' AND created_at <= ?'; params.push(end_date); }
+    if (search) {
+      query += ' AND (action LIKE ? OR subject LIKE ? OR screen LIKE ? OR metadata LIKE ?)';
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
+    }
+
+    // Se ordena DESC para que el LIMIT recorte por la cola vieja y devuelva
+    // siempre la ventana mas reciente; created_at tiene resolucion de segundo
+    // y una rafaga mete varios eventos en el mismo, asi que desempata id
+    // (AUTOINCREMENT = orden real de insercion). Luego se invierte, porque
+    // para reconstruir lo que hizo alguien el orden util es el cronologico.
+    query += ' ORDER BY created_at DESC, id DESC LIMIT ?';
+    params.push(limit);
+
+    const { results } = await c.env.ANALYTICS_DB.prepare(query)
+      .bind(...params)
+      .all<Record<string, unknown>>();
+
+    const events = (results || []).reverse().map((e) => ({
+      ...e,
+      metadata: e.metadata ? tryParseJSON(e.metadata as string) : null,
+    }));
+
+    return c.json({ events, count: events.length });
+  } catch (error) {
+    console.error('Error searching behaviour events:', error);
+    return c.json({ error: 'Failed to search behaviour events' }, 500);
   }
 });
 

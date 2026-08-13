@@ -29,6 +29,9 @@ describe('mcp', () => {
     const body = await res.json() as { result?: { tools: Array<{ name: string }> } };
     expect(body.result?.tools).toBeTruthy();
     expect(body.result?.tools.find((t) => t.name === 'search_logs')).toBeTruthy();
-    expect(body.result?.tools).toHaveLength(12);
+    // Los USER_ACTION no viven en `logs`, asi que search_logs jamas los ve:
+    // hace falta un tool propio contra behaviour_events.
+    expect(body.result?.tools.find((t) => t.name === 'search_behaviour')).toBeTruthy();
+    expect(body.result?.tools).toHaveLength(13);
   });
 });

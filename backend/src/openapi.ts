@@ -45,6 +45,9 @@ export const OPENAPI_SPEC = {
       put: { summary: 'Upload screenshot (image/*, ≤2MB)' },
       get: { summary: 'Fetch screenshot bytes', security: [{ bearerToken: [] }, { sessionCookie: [] }] },
     },
+    '/behaviour/events': {
+      get: { summary: 'Search raw user-behaviour events', security: [{ bearerToken: [] }, { sessionCookie: [] }] },
+    },
     '/trace/{trace_id}': { get: { summary: 'Cross-system trace', security: [{ bearerToken: [] }, { sessionCookie: [] }] } },
     '/agent/triage-summary': { get: { summary: 'One-call digest for agents', security: [{ bearerToken: [] }, { sessionCookie: [] }] } },
     '/auth/tokens': {
