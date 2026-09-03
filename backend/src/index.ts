@@ -689,6 +689,10 @@ function parseReplayFields(r: LogReplay): Record<string, unknown> {
 }
 
 // Get all logs with optional filtering
+// Techo del COUNT de paginación. Un COUNT(*) exacto sobre `logs` barre la tabla
+// entera; 10.000 basta para paginar y acota lo que D1 llega a leer.
+const COUNT_CAP = 10000;
+
 app.get('/logs', async (c) => {
   try {
     const userId = c.req.query('user_id');
@@ -787,7 +791,7 @@ app.get('/logs', async (c) => {
       .all<Log>();
 
     // Get total count for pagination
-    let countQuery = 'SELECT COUNT(*) as count FROM logs WHERE 1=1';
+    let countQuery = 'SELECT 1 FROM logs WHERE 1=1';
     const countParams: string[] = [];
 
     if (userId) {
@@ -857,13 +861,21 @@ app.get('/logs', async (c) => {
       countParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
-    const countResult = await c.env.DB.prepare(countQuery)
+    // COUNT(*) ACOTADO: sin el LIMIT interior esto barría la tabla entera en cada
+    // página (359 MB) y, sumado al ORDER BY, reventó el límite diario de lecturas de
+    // D1 → 500 "Failed to fetch logs". El techo se devuelve como `total` y se marca
+    // con `total_is_capped` para que la UI pueda pintar "10.000+" en vez de mentir.
+    const countResult = await c.env.DB.prepare(
+      `SELECT COUNT(*) as count FROM (${countQuery} LIMIT ${COUNT_CAP + 1})`
+    )
       .bind(...countParams)
       .first<{ count: number }>();
+    const total = countResult?.count || 0;
 
     return c.json({
       logs: results?.map(parseLogFields) || [],
-      total: countResult?.count || 0,
+      total: Math.min(total, COUNT_CAP),
+      total_is_capped: total > COUNT_CAP,
       limit,
       offset,
     });
