@@ -12,6 +12,8 @@ declare module 'cloudflare:test' {
 async function setupDatabase() {
   await env.DB.exec(`CREATE TABLE IF NOT EXISTS logs (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, device_id TEXT, message TEXT NOT NULL, metadata TEXT, environment TEXT DEFAULT 'dev', source TEXT, created_at DATETIME DEFAULT CURRENT_TIMESTAMP, level TEXT DEFAULT 'info', category TEXT DEFAULT 'GENERAL', http_method TEXT, endpoint TEXT, request_data TEXT, response_data TEXT, status_code INTEGER, duration_ms REAL)`);
 
+  await env.DB.exec(`CREATE TABLE IF NOT EXISTS log_dimensions (kind TEXT NOT NULL, value TEXT NOT NULL, PRIMARY KEY (kind, value))`);
+
   await env.DB.exec(`CREATE TABLE IF NOT EXISTS archives (id INTEGER PRIMARY KEY AUTOINCREMENT, archive_date TEXT NOT NULL UNIQUE, log_count INTEGER NOT NULL, data TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);
 
   await env.DB.exec(`CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at DATETIME DEFAULT CURRENT_TIMESTAMP)`);

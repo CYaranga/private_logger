@@ -1421,6 +1421,7 @@ export default function App() {
   const [sources, setSources] = useState<string[]>([]);
   const [categories, setCategories] = useState<string[]>([]);
   const [total, setTotal] = useState(0);
+  const [totalCapped, setTotalCapped] = useState(false);
   const [page, setPage] = useState(1);
   const [perPage, setPerPage] = useState(50);
   const [loading, setLoading] = useState(true);
@@ -1494,6 +1495,9 @@ export default function App() {
   }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
+  // El backend deja de contar en 10.000 para no barrer la tabla; pintar "10.000" a
+  // secas mentiria sobre cuantos hay.
+  const totalLabel = `${total.toLocaleString()}${totalCapped ? '+' : ''}`;
 
   const loadData = useCallback(async (targetPage?: number) => {
     const p = targetPage ?? page;
@@ -1514,6 +1518,7 @@ export default function App() {
       ]);
       setLogs(logsData.logs);
       setTotal(logsData.total);
+      setTotalCapped(Boolean(logsData.total_is_capped));
       setStats(statsData);
       setUsers(usersData);
       setDevices(devicesData);
@@ -1535,7 +1540,9 @@ export default function App() {
     // Auto-refresh polling pauses while live tail is active — the SSE stream
     // delivers entries as they land so a 30s reload would be wasted work.
     if (!autoRefresh || liveTail) return;
-    const interval = setInterval(loadData, 30000);
+    // 60 s, no 30: cada refresco cuesta un barrido de `logs` para /stats, y el plan
+    // gratuito de D1 da 5M filas leidas al dia.
+    const interval = setInterval(loadData, 60000);
     return () => clearInterval(interval);
   }, [loadData, autoRefresh, liveTail]);
 
@@ -1650,8 +1657,8 @@ export default function App() {
     ].filter(Boolean).join(', ');
 
     const msg = hasActiveFilters
-      ? `Delete all ${total.toLocaleString()} logs matching:\n\n${filterDesc}\n\nThis cannot be undone.`
-      : `Delete ALL ${total.toLocaleString()} logs?\n\nNo filters are active — this deletes everything.\n\nThis cannot be undone.`;
+      ? `Delete all ${totalLabel} logs matching:\n\n${filterDesc}\n\nThis cannot be undone.`
+      : `Delete ALL ${totalLabel} logs?\n\nNo filters are active — this deletes everything.\n\nThis cannot be undone.`;
 
     if (!confirm(msg)) return;
 
@@ -1684,7 +1691,9 @@ export default function App() {
       while (true) {
         const res = await fetchLogs(filters, PAGE, offset);
         all.push(...res.logs);
-        if (all.length >= res.total || res.logs.length === 0) break;
+        // Por pagina corta, NO por `res.total`: el backend lo tapa a 10.000 para no
+        // barrer la tabla contando, y compararlo truncaba la exportacion ahi.
+        if (res.logs.length < PAGE) break;
         offset += res.logs.length;
         if (offset > 100000) break;
       }
@@ -1809,7 +1818,7 @@ export default function App() {
 
             <div className="mobile-toolbar">
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                {total.toLocaleString()} logs
+                {totalLabel} logs
                 {hasActiveFilters && <span style={{ color: 'var(--accent)' }}> · filtered</span>}
               </span>
               <div style={{ display: 'flex', gap: '6px' }}>
@@ -1861,7 +1870,7 @@ export default function App() {
 
                 <div className="pagination mobile-pagination">
                   <div className="pagination-info">
-                    {(page - 1) * perPage + 1}–{Math.min(page * perPage, total)} of {total.toLocaleString()}
+                    {(page - 1) * perPage + 1}–{Math.min(page * perPage, total)} of {totalLabel}
                   </div>
                   <div className="pagination-controls">
                     <select className="per-page-select" value={perPage} onChange={(ev) => setPerPage(Number(ev.target.value))}>
@@ -2181,7 +2190,7 @@ export default function App() {
           <div className="table-toolbar">
             <div className="table-toolbar-left">
               <span style={{ fontFamily: 'var(--font-mono)', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                {total.toLocaleString()} logs
+                {totalLabel} logs
                 {hasActiveFilters && <span style={{ color: 'var(--accent)' }}> · filtered</span>}
               </span>
             </div>
@@ -2248,7 +2257,7 @@ export default function App() {
 
               <div className="pagination">
                 <div className="pagination-info">
-                  {(page - 1) * perPage + 1}–{Math.min(page * perPage, total)} of {total.toLocaleString()}
+                  {(page - 1) * perPage + 1}–{Math.min(page * perPage, total)} of {totalLabel}
                 </div>
                 <div className="pagination-controls">
                   <select className="per-page-select" value={perPage} onChange={(ev) => setPerPage(Number(ev.target.value))}>

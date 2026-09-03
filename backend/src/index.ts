@@ -222,6 +222,43 @@ const DAYS_TO_KEEP_IN_LOGS = 7; // Keep 7 days in main logs table
 
 const BEHAVIOUR_CATEGORIES = new Set(['USER_ACTION']);
 
+// El dashboard operativo esconde los logs de comportamiento (otro producto) y el
+// ruido de [HTTP] en debug. Estaba copiado literal en once consultas; una sola
+// definición evita que se desincronicen.
+const DASHBOARD_ROW_SQL =
+  `(endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`;
+
+function isDashboardRow(level: string, endpoint: string | null, message: string): boolean {
+  if (endpoint && endpoint.includes('/behaviour/')) return false;
+  if (level === 'debug' && message.startsWith('[HTTP]')) return false;
+  return true;
+}
+
+// Alimenta `log_dimensions` (migración 0011), de donde salen los desplegables del
+// dashboard. `INSERT OR IGNORE` no escribe nada cuando el valor ya está, así que en
+// régimen esto no consume presupuesto de escritura. Su fallo lo traga quien la llama:
+// un desplegable incompleto hasta el rebuild nocturno es aceptable, tumbar la ingesta
+// de logs —el camino crítico del cliente móvil— no lo es.
+async function recordDimensions(
+  db: D1Database,
+  row: { user_id: string; device_id: string | null; source: string | null; category: string | null }
+): Promise<void> {
+  const dims: Array<[string, string]> = [['user_id', row.user_id]];
+  if (row.device_id) dims.push(['device_id', row.device_id]);
+  if (row.source) dims.push(['source', row.source]);
+  if (row.category) dims.push(['category', row.category]);
+  const stmt = db.prepare('INSERT OR IGNORE INTO log_dimensions (kind, value) VALUES (?, ?)');
+  await db.batch(dims.map(([kind, value]) => stmt.bind(kind, value)));
+}
+
+async function readDimension(db: D1Database, kind: string): Promise<string[]> {
+  const { results } = await db
+    .prepare('SELECT value FROM log_dimensions WHERE kind = ? ORDER BY value')
+    .bind(kind)
+    .all<{ value: string }>();
+  return (results || []).map((r) => r.value);
+}
+
 function resolveSource(
   body: Partial<CreateLogInput> | null | undefined,
   parsed: Record<string, unknown>
@@ -633,6 +670,23 @@ app.post('/logs', async (c) => {
           .bind(result.id).run();
       } catch (e) {
         console.error('Behaviour processing failed, log retained in raw DB:', e);
+      }
+    }
+
+    // Los logs de comportamiento se acaban de borrar de `logs`, así que sus valores
+    // no deben entrar en los desplegables: el rebuild nocturno los quitaría igual.
+    if (result && !BEHAVIOUR_CATEGORIES.has(category)) {
+      try {
+        await recordDimensions(c.env.DB, {
+          user_id: body.user_id,
+          device_id,
+          source,
+          category: isDashboardRow(level, endpoint, body.message) ? category : null,
+        });
+      } catch (e) {
+        // Un desplegable incompleto hasta el rebuild de las 03:00 es aceptable;
+        // rechazar el log del cliente móvil por esto, no. El log ya está guardado.
+        console.error('recordDimensions failed:', e);
       }
     }
 
@@ -1073,13 +1127,14 @@ app.get('/logs/recent', async (c) => {
 });
 
 // Get unique user IDs for filtering
+// Los cuatro desplegables (/users, /categories, /devices, /sources) salían de un
+// `SELECT DISTINCT` sobre `logs` cada uno: cuatro barridos completos por refresco del
+// dashboard, dos tercios de las lecturas que reventaron la cuota diaria de D1. Ahora
+// leen `log_dimensions` (unos cientos de filas). Lo mantiene `recordDimensions` al
+// insertar, y el cron de las 03:00 lo reconstruye para purgar valores ya archivados.
 app.get('/users', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare(
-      'SELECT DISTINCT user_id FROM logs ORDER BY user_id'
-    ).all<{ user_id: string }>();
-
-    return c.json({ users: results?.map(r => r.user_id) || [] });
+    return c.json({ users: await readDimension(c.env.DB, 'user_id') });
   } catch (error) {
     console.error('Error fetching users:', error);
     return c.json({ error: 'Failed to fetch users' }, 500);
@@ -1089,11 +1144,7 @@ app.get('/users', async (c) => {
 // Get unique categories for filtering
 app.get('/categories', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare(
-      `SELECT DISTINCT category FROM logs WHERE category IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%') ORDER BY category`
-    ).all<{ category: string }>();
-
-    return c.json({ categories: results?.map(r => r.category) || [] });
+    return c.json({ categories: await readDimension(c.env.DB, 'category') });
   } catch (error) {
     console.error('Error fetching categories:', error);
     return c.json({ error: 'Failed to fetch categories' }, 500);
@@ -1103,11 +1154,7 @@ app.get('/categories', async (c) => {
 // Get unique device IDs for filtering
 app.get('/devices', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare(
-      'SELECT DISTINCT device_id FROM logs WHERE device_id IS NOT NULL ORDER BY device_id'
-    ).all<{ device_id: string }>();
-
-    return c.json({ devices: results?.map(r => r.device_id) || [] });
+    return c.json({ devices: await readDimension(c.env.DB, 'device_id') });
   } catch (error) {
     console.error('Error fetching devices:', error);
     return c.json({ error: 'Failed to fetch devices' }, 500);
@@ -1117,11 +1164,7 @@ app.get('/devices', async (c) => {
 // Get unique sources for filtering
 app.get('/sources', async (c) => {
   try {
-    const { results } = await c.env.DB.prepare(
-      'SELECT DISTINCT source FROM logs WHERE source IS NOT NULL ORDER BY source'
-    ).all<{ source: string }>();
-
-    return c.json({ sources: results?.map(r => r.source) || [] });
+    return c.json({ sources: await readDimension(c.env.DB, 'source') });
   } catch (error) {
     console.error('Error fetching sources:', error);
     return c.json({ error: 'Failed to fetch sources' }, 500);
@@ -1669,67 +1712,96 @@ app.get('/behaviour/events', authMiddleware, async (c) => {
 });
 
 // Get log statistics including storage info
+// Antes: NUEVE consultas independientes sobre `logs`, cada una un barrido completo
+// (~1,28M filas por refresco del dashboard, que se auto-refresca solo). Ahora UNA
+// sola pasada agrupada por las cuatro dimensiones que pintan los paneles; los ocho
+// agregados salen de ella sumando en JS. `uniqueUsers` viene de `log_dimensions`,
+// que es justo la lista de user_id distintos.
+// Respuesta cacheada CACHE_TTL_STATS s: sin eso, el auto-refresco del dashboard
+// repite el barrido cada minuto y agota la cuota diaria en una hora abierta.
+const CACHE_TTL_STATS = 600;
+
+interface StatsRollupRow {
+  environment: string | null;
+  level: string | null;
+  category: string | null;
+  source: string | null;
+  n: number;
+  n_dash: number;
+  n_24h: number;
+  n_api: number;
+}
+
+function sumBy<K extends keyof StatsRollupRow>(
+  rows: StatsRollupRow[],
+  key: K,
+  weight: (r: StatsRollupRow) => number
+): Array<{ value: string | null; count: number }> {
+  const acc = new Map<string | null, number>();
+  for (const r of rows) {
+    const w = weight(r);
+    if (!w) continue;
+    const k = r[key] as string | null;
+    acc.set(k, (acc.get(k) || 0) + w);
+  }
+  return [...acc].map(([value, count]) => ({ value, count })).sort((a, b) => b.count - a.count);
+}
+
 app.get('/stats', async (c) => {
   try {
+    const cache = caches.default;
+    const cached = await cache.match(c.req.raw);
+    // Copia mutable: lo que devuelve la Cache API trae cabeceras inmutables y el
+    // middleware CORS escribe sobre la respuesta al salir.
+    if (cached) return new Response(cached.body, cached);
+
     // Stats panels exclude behaviour (USER_ACTION) — those belong to the
     // user-behaviour analytics surface, not the operational dashboard.
-    const totalLogs = await c.env.DB.prepare(
-      `SELECT COUNT(*) as count FROM logs WHERE category != 'USER_ACTION'`
-    ).first<{ count: number }>();
-
-    const byEnvironment = await c.env.DB.prepare(
-      `SELECT environment, COUNT(*) as count FROM logs WHERE category != 'USER_ACTION' GROUP BY environment`
-    ).all<{ environment: string; count: number }>();
-
-    const byLevel = await c.env.DB.prepare(
-      `SELECT level, COUNT(*) as count FROM logs WHERE category != 'USER_ACTION' GROUP BY level`
-    ).all<{ level: string; count: number }>();
-
-    const byCategory = await c.env.DB.prepare(
-      `SELECT category, COUNT(*) as count FROM logs WHERE category != 'USER_ACTION' GROUP BY category ORDER BY count DESC LIMIT 10`
-    ).all<{ category: string; count: number }>();
-
-    const bySource = await c.env.DB.prepare(
-      `SELECT source, COUNT(*) as count FROM logs WHERE source IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%') GROUP BY source ORDER BY count DESC`
-    ).all<{ source: string; count: number }>();
+    const { results } = await c.env.DB.prepare(
+      `SELECT environment, level, category, source,
+              COUNT(*) AS n,
+              SUM(CASE WHEN ${DASHBOARD_ROW_SQL} THEN 1 ELSE 0 END) AS n_dash,
+              SUM(CASE WHEN ${DASHBOARD_ROW_SQL} AND created_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS n_24h,
+              SUM(CASE WHEN ${DASHBOARD_ROW_SQL} AND http_method IS NOT NULL THEN 1 ELSE 0 END) AS n_api
+         FROM logs
+        WHERE category != 'USER_ACTION'
+        GROUP BY environment, level, category, source`
+    ).all<StatsRollupRow>();
+    const rows = results || [];
 
     const uniqueUsers = await c.env.DB.prepare(
-      `SELECT COUNT(DISTINCT user_id) as count FROM logs WHERE category != 'USER_ACTION'`
+      `SELECT COUNT(*) as count FROM log_dimensions WHERE kind = 'user_id'`
     ).first<{ count: number }>();
 
-    const recentLogs = await c.env.DB.prepare(
-      `SELECT COUNT(*) as count FROM logs WHERE created_at >= datetime('now', '-24 hours') AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`
-    ).first<{ count: number }>();
-
-    // Get archive stats
     const archiveStats = await c.env.DB.prepare(
       'SELECT COUNT(*) as count, SUM(log_count) as total_logs FROM archives'
     ).first<{ count: number; total_logs: number }>();
 
-    // Get API call stats
-    const apiCallStats = await c.env.DB.prepare(
-      `SELECT COUNT(*) as count FROM logs WHERE http_method IS NOT NULL AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`
-    ).first<{ count: number }>();
+    const all = (r: StatsRollupRow) => r.n;
+    const dash = (r: StatsRollupRow) => r.n_dash;
 
-    const errorCount = await c.env.DB.prepare(
-      `SELECT COUNT(*) as count FROM logs WHERE level = 'error' AND category != 'USER_ACTION' AND (endpoint IS NULL OR endpoint NOT LIKE '%/behaviour/%') AND NOT (level = 'debug' AND message LIKE '[HTTP]%')`
-    ).first<{ count: number }>();
-
-    return c.json({
-      total: totalLogs?.count || 0,
+    const payload = {
+      total: rows.reduce((a, r) => a + r.n, 0),
       uniqueUsers: uniqueUsers?.count || 0,
-      last24Hours: recentLogs?.count || 0,
-      byEnvironment: byEnvironment.results || [],
-      byLevel: byLevel.results || [],
-      byCategory: byCategory.results || [],
-      bySource: bySource.results || [],
-      apiCalls: apiCallStats?.count || 0,
-      errorCount: errorCount?.count || 0,
+      last24Hours: rows.reduce((a, r) => a + r.n_24h, 0),
+      byEnvironment: sumBy(rows, 'environment', all).map((e) => ({ environment: e.value, count: e.count })),
+      byLevel: sumBy(rows, 'level', all).map((e) => ({ level: e.value, count: e.count })),
+      byCategory: sumBy(rows, 'category', all).slice(0, 10).map((e) => ({ category: e.value, count: e.count })),
+      bySource: sumBy(rows, 'source', dash)
+        .filter((e) => e.value !== null)
+        .map((e) => ({ source: e.value, count: e.count })),
+      apiCalls: rows.reduce((a, r) => a + r.n_api, 0),
+      errorCount: rows.reduce((a, r) => a + (r.level === 'error' ? r.n_dash : 0), 0),
       archives: {
         count: archiveStats?.count || 0,
         totalLogs: archiveStats?.total_logs || 0,
       },
-    });
+    };
+
+    const response = c.json(payload);
+    response.headers.set('cache-control', `public, max-age=${CACHE_TTL_STATS}`);
+    await cache.put(c.req.raw, response.clone());
+    return response;
   } catch (error) {
     console.error('Error fetching stats:', error);
     return c.json({ error: 'Failed to fetch stats' }, 500);
@@ -2117,7 +2189,44 @@ async function scheduled(
     console.error('Scheduled archive failed:', error);
   }
 
-  // 2. Retry stale behaviour logs (failed inline processing)
+  // 2. Reconciliar `log_dimensions` con lo que queda vivo en `logs`. `recordDimensions`
+  //    solo añade; sin esto, un device_id de hace meses se quedaría para siempre en el
+  //    desplegable aunque su log ya esté archivado. UNA pasada por la tabla al día.
+  try {
+    const { results } = await env.DB.prepare(
+      `SELECT DISTINCT user_id, device_id, source,
+              CASE WHEN category != 'USER_ACTION' AND ${DASHBOARD_ROW_SQL} THEN category END AS category
+         FROM logs`
+    ).all<{ user_id: string | null; device_id: string | null; source: string | null; category: string | null }>();
+
+    const live = new Set<string>();
+    for (const r of results || []) {
+      if (r.user_id) live.add(`user_id\u0000${r.user_id}`);
+      if (r.device_id) live.add(`device_id\u0000${r.device_id}`);
+      if (r.source) live.add(`source\u0000${r.source}`);
+      if (r.category) live.add(`category\u0000${r.category}`);
+    }
+
+    const { results: stored } = await env.DB.prepare(
+      'SELECT kind, value FROM log_dimensions'
+    ).all<{ kind: string; value: string }>();
+    const known = new Set((stored || []).map((r) => `${r.kind}\u0000${r.value}`));
+
+    const del = env.DB.prepare('DELETE FROM log_dimensions WHERE kind = ? AND value = ?');
+    const ins = env.DB.prepare('INSERT OR IGNORE INTO log_dimensions (kind, value) VALUES (?, ?)');
+    const writes = [
+      ...[...known].filter((k) => !live.has(k)).map((k) => del.bind(...k.split('\u0000'))),
+      ...[...live].filter((k) => !known.has(k)).map((k) => ins.bind(...k.split('\u0000'))),
+    ];
+    if (writes.length > 0) {
+      await env.DB.batch(writes);
+      console.log(`Reconciled log_dimensions: ${writes.length} changes`);
+    }
+  } catch (error) {
+    console.error('log_dimensions reconcile failed:', error);
+  }
+
+  // 3. Retry stale behaviour logs (failed inline processing)
   try {
     const stale = await env.DB.prepare(
       `SELECT * FROM logs WHERE category = 'USER_ACTION'
