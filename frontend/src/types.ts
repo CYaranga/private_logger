@@ -40,7 +40,7 @@ export interface LogsResponse {
   logs: Log[];
   /** Tapado por el techo de paginación del backend; ver `total_is_capped`. */
   total: number;
-  /** true = hay más de `total`; el backend deja de contar para no barrer la tabla. */
+  /** true = hay más de `total`; el backend deja de contar (COUNT_CAP) para no barrer la tabla. */
   total_is_capped?: boolean;
   limit: number;
   offset: number;

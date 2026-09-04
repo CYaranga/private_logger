@@ -1495,9 +1495,12 @@ export default function App() {
   }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / perPage));
-  // El backend deja de contar en 10.000 para no barrer la tabla; pintar "10.000" a
+  // El backend deja de contar en 1.000 para no barrer la tabla; pintar "1.000" a
   // secas mentiria sobre cuantos hay.
   const totalLabel = `${total.toLocaleString()}${totalCapped ? '+' : ''}`;
+  // Con el total tapado, `totalPages` no dice dónde acaba de verdad: mientras la página
+  // venga llena hay más detrás, así que "siguiente" se habilita por eso.
+  const hasNextPage = page < totalPages || (totalCapped && logs.length === perPage);
 
   const loadData = useCallback(async (targetPage?: number) => {
     const p = targetPage ?? page;
@@ -1691,8 +1694,8 @@ export default function App() {
       while (true) {
         const res = await fetchLogs(filters, PAGE, offset);
         all.push(...res.logs);
-        // Por pagina corta, NO por `res.total`: el backend lo tapa a 10.000 para no
-        // barrer la tabla contando, y compararlo truncaba la exportacion ahi.
+        // Por pagina corta, NO por `res.total`: el backend lo tapa (COUNT_CAP) para no
+        // barrer la tabla contando, y compararlo truncaba la exportacion en ese techo.
         if (res.logs.length < PAGE) break;
         offset += res.logs.length;
         if (offset > 100000) break;
@@ -1880,7 +1883,7 @@ export default function App() {
                     </select>
                     <button className="btn btn-secondary" disabled={page <= 1 || loading} onClick={() => setPage(p => p - 1)}>‹</button>
                     <span className="page-indicator">{page}/{totalPages}</span>
-                    <button className="btn btn-secondary" disabled={page >= totalPages || loading} onClick={() => setPage(p => p + 1)}>›</button>
+                    <button className="btn btn-secondary" disabled={!hasNextPage || loading} onClick={() => setPage(p => p + 1)}>›</button>
                   </div>
                 </div>
               </>
@@ -2268,7 +2271,7 @@ export default function App() {
                   <button className="btn btn-secondary" disabled={page <= 1 || loading} onClick={() => setPage(1)}>«</button>
                   <button className="btn btn-secondary" disabled={page <= 1 || loading} onClick={() => setPage(p => p - 1)}>‹</button>
                   <span className="page-indicator">{page} / {totalPages}</span>
-                  <button className="btn btn-secondary" disabled={page >= totalPages || loading} onClick={() => setPage(p => p + 1)}>›</button>
+                  <button className="btn btn-secondary" disabled={!hasNextPage || loading} onClick={() => setPage(p => p + 1)}>›</button>
                   <button className="btn btn-secondary" disabled={page >= totalPages || loading} onClick={() => setPage(totalPages)}>»</button>
                 </div>
               </div>

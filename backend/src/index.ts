@@ -744,8 +744,11 @@ function parseReplayFields(r: LogReplay): Record<string, unknown> {
 
 // Get all logs with optional filtering
 // Techo del COUNT de paginación. Un COUNT(*) exacto sobre `logs` barre la tabla
-// entera; 10.000 basta para paginar y acota lo que D1 llega a leer.
-const COUNT_CAP = 10000;
+// entera. Medido el 2026-09-04: con techo 10.000 el COUNT leía 13.337 filas por
+// refresco del dashboard —más que ninguna otra consulta ya optimizada—; con 1.000
+// son ~1.300. El paginador no pierde fondo: cuando el total viene tapado, "siguiente"
+// se habilita por página llena en vez de por el total (ver App.tsx).
+const COUNT_CAP = 1000;
 
 app.get('/logs', async (c) => {
   try {
@@ -1719,7 +1722,7 @@ app.get('/behaviour/events', authMiddleware, async (c) => {
 // que es justo la lista de user_id distintos.
 // Respuesta cacheada CACHE_TTL_STATS s: sin eso, el auto-refresco del dashboard
 // repite el barrido cada minuto y agota la cuota diaria en una hora abierta.
-const CACHE_TTL_STATS = 600;
+const CACHE_TTL_STATS = 900;
 
 interface StatsRollupRow {
   environment: string | null;
