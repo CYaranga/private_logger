@@ -9,17 +9,20 @@ CREATE TABLE IF NOT EXISTS log_dimensions (
   PRIMARY KEY (kind, value)
 );
 
--- Relleno inicial. Cuatro barridos, UNA vez. El filtro de `category` es el mismo que
--- aplicaba /categories: los logs de comportamiento son de otro producto y nunca
--- salieron en ese desplegable.
+-- Relleno inicial. Cuatro barridos, UNA vez. Los cuatro excluyen USER_ACTION, igual
+-- que `recordDimensions`: son logs de comportamiento de otro producto, se borran de
+-- `logs` nada mas procesarlos y no deben salir en ningun desplegable.
 INSERT OR IGNORE INTO log_dimensions (kind, value)
-  SELECT DISTINCT 'user_id', user_id FROM logs WHERE user_id IS NOT NULL;
+  SELECT DISTINCT 'user_id', user_id FROM logs
+   WHERE user_id IS NOT NULL AND category != 'USER_ACTION';
 
 INSERT OR IGNORE INTO log_dimensions (kind, value)
-  SELECT DISTINCT 'device_id', device_id FROM logs WHERE device_id IS NOT NULL;
+  SELECT DISTINCT 'device_id', device_id FROM logs
+   WHERE device_id IS NOT NULL AND category != 'USER_ACTION';
 
 INSERT OR IGNORE INTO log_dimensions (kind, value)
-  SELECT DISTINCT 'source', source FROM logs WHERE source IS NOT NULL;
+  SELECT DISTINCT 'source', source FROM logs
+   WHERE source IS NOT NULL AND category != 'USER_ACTION';
 
 INSERT OR IGNORE INTO log_dimensions (kind, value)
   SELECT DISTINCT 'category', category FROM logs

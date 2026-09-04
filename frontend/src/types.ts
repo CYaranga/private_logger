@@ -38,8 +38,9 @@ export interface Log {
 
 export interface LogsResponse {
   logs: Log[];
-  /** Tapado por el techo de paginación del backend; ver `total_is_capped`. */
-  total: number;
+  /** Tapado por el techo de paginación del backend; ver `total_is_capped`.
+   *  Ausente cuando se pidió con `count=0`. */
+  total?: number;
   /** true = hay más de `total`; el backend deja de contar (COUNT_CAP) para no barrer la tabla. */
   total_is_capped?: boolean;
   limit: number;

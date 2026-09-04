@@ -23,7 +23,10 @@ function getFetchOptions(options: RequestInit = {}): RequestInit {
 export async function fetchLogs(
   filters: Filters,
   limit: number,
-  offset: number
+  offset: number,
+  /** false = no pidas el total. Paginar en bucle con el COUNT activo cuesta ~1.300
+   *  filas leidas de D1 por vuelta, y quien pagina en bucle no usa el total. */
+  withCount = true
 ): Promise<LogsResponse> {
   const params = new URLSearchParams();
 
@@ -42,6 +45,7 @@ export async function fetchLogs(
   if (filters.end_date) params.append('end_date', filters.end_date);
   params.append('limit', limit.toString());
   params.append('offset', offset.toString());
+  if (!withCount) params.append('count', '0');
 
   const response = await fetch(`${API_BASE}/logs?${params}`, getFetchOptions());
   if (!response.ok) throw new Error('Failed to fetch logs');

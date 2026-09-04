@@ -1520,7 +1520,7 @@ export default function App() {
         fetchArchives(),
       ]);
       setLogs(logsData.logs);
-      setTotal(logsData.total);
+      setTotal(logsData.total ?? 0);
       setTotalCapped(Boolean(logsData.total_is_capped));
       setStats(statsData);
       setUsers(usersData);
@@ -1692,7 +1692,7 @@ export default function App() {
       const all: Log[] = [];
       let offset = 0;
       while (true) {
-        const res = await fetchLogs(filters, PAGE, offset);
+        const res = await fetchLogs(filters, PAGE, offset, false);
         all.push(...res.logs);
         // Por pagina corta, NO por `res.total`: el backend lo tapa (COUNT_CAP) para no
         // barrer la tabla contando, y compararlo truncaba la exportacion en ese techo.

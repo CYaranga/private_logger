@@ -918,10 +918,20 @@ app.get('/logs', async (c) => {
       countParams.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
     }
 
+    const logs = results?.map(parseLogFields) || [];
+
+    // `count=0`: quien pagina en bucle (la exportación CSV del dashboard) no usa el
+    // total y corta por página corta. Ejecutar el COUNT en cada una de sus 200 vueltas
+    // costaba hasta 2,1M filas leídas de un solo click — el 42% de la cuota diaria
+    // que este cambio existe para proteger.
+    if (c.req.query('count') === '0') {
+      return c.json({ logs, limit, offset });
+    }
+
     // COUNT(*) ACOTADO: sin el LIMIT interior esto barría la tabla entera en cada
     // página (359 MB) y, sumado al ORDER BY, reventó el límite diario de lecturas de
     // D1 → 500 "Failed to fetch logs". El techo se devuelve como `total` y se marca
-    // con `total_is_capped` para que la UI pueda pintar "10.000+" en vez de mentir.
+    // con `total_is_capped` para que la UI pueda pintar "1.000+" en vez de mentir.
     const countResult = await c.env.DB.prepare(
       `SELECT COUNT(*) as count FROM (${countQuery} LIMIT ${COUNT_CAP + 1})`
     )
@@ -930,7 +940,7 @@ app.get('/logs', async (c) => {
     const total = countResult?.count || 0;
 
     return c.json({
-      logs: results?.map(parseLogFields) || [],
+      logs,
       total: Math.min(total, COUNT_CAP),
       total_is_capped: total > COUNT_CAP,
       limit,
@@ -2195,11 +2205,16 @@ async function scheduled(
   // 2. Reconciliar `log_dimensions` con lo que queda vivo en `logs`. `recordDimensions`
   //    solo añade; sin esto, un device_id de hace meses se quedaría para siempre en el
   //    desplegable aunque su log ya esté archivado. UNA pasada por la tabla al día.
+  //    El `WHERE category != 'USER_ACTION'` es el MISMO filtro que aplica
+  //    `recordDimensions`: una fila de comportamiento atascada (falló su
+  //    processBehaviourLog) tiene user_id y device_id que no deben salir en los
+  //    desplegables ni inflar `uniqueUsers` en /stats, que la excluye explícitamente.
   try {
     const { results } = await env.DB.prepare(
       `SELECT DISTINCT user_id, device_id, source,
-              CASE WHEN category != 'USER_ACTION' AND ${DASHBOARD_ROW_SQL} THEN category END AS category
-         FROM logs`
+              CASE WHEN ${DASHBOARD_ROW_SQL} THEN category END AS category
+         FROM logs
+        WHERE category != 'USER_ACTION'`
     ).all<{ user_id: string | null; device_id: string | null; source: string | null; category: string | null }>();
 
     const live = new Set<string>();
